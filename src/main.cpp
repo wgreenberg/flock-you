@@ -1,9 +1,10 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <ArduinoJson.h>
+#include <MsgPack.h>
 #include <NimBLEDevice.h>
 #include <NimBLEScan.h>
 #include <NimBLEAdvertisedDevice.h>
-#include <ArduinoJson.h>
 #include <string.h>
 #include <ctype.h>
 #include <stdio.h>
@@ -35,6 +36,12 @@
 #define BLE_SCAN_DURATION 1    // Seconds
 #define BLE_SCAN_INTERVAL 5000 // Milliseconds between scans
 static unsigned long last_ble_scan = 0;
+
+// Debug
+#define DEBUG_BLE 0
+static unsigned long last_fake_ble = 0;
+#define DEBUG_WIFI 0
+static unsigned long last_fake_wifi = 0;
 
 // Detection Pattern Limits
 #define MAX_SSID_PATTERNS 10
@@ -92,7 +99,10 @@ static bool device_in_range = false;
 static unsigned long last_detection_time = 0;
 static unsigned long last_heartbeat = 0;
 static NimBLEScan* pBLEScan;
-
+static NimBLEServer* pServer;
+static const char* BLE_DEVICE_NAME = "FlockYou";
+static const NimBLEUUID BLE_SERVICE_UUID = NimBLEUUID(0xACAB0001);
+static const char* BLE_CHARACTERISTIC_UUID = "0001";
 
 
 // ============================================================================
@@ -130,6 +140,38 @@ void flock_detected_beep_sequence()
     last_heartbeat = millis();
 }
 
+void notify(MsgPack::Packer packer) {
+    NimBLEService* pSvc = pServer->getServiceByUUID(BLE_SERVICE_UUID);
+    if (!pSvc) {
+        printf("fuck\n");
+        return;
+    }
+    NimBLECharacteristic* pChr = pSvc->getCharacteristic(BLE_CHARACTERISTIC_UUID);
+    if (!pChr) {
+        printf("fuck!\n");
+        return;
+    }
+    if (packer.size() > 256) {
+        printf("failed to notify, data too large!");
+        MsgPack::Packer tooLargePacker;
+        tooLargePacker.to_array("data_too_large");
+        pChr->notify(tooLargePacker.data());
+        return;
+    }
+
+    // MsgPack::Unpacker unpacker;
+    // StaticJsonDocument<256> doc;
+    // String jsonOutput;
+    // unpacker.feed(packer.data(), packer.size());
+    // unpacker.deserialize(doc);
+    // serializeJson(doc, jsonOutput);
+    printf("notifying (%d bytes)...\n", packer.size());
+    // Serial.println(jsonOutput);
+
+    pChr->setValue(packer.data(), packer.size());
+    pChr->notify();
+}
+
 void heartbeat_pulse()
 {
     printf("Heartbeat: Device still in range\n");
@@ -142,159 +184,92 @@ void heartbeat_pulse()
 // JSON OUTPUT FUNCTIONS
 // ============================================================================
 
-void output_wifi_detection_json(const char* ssid, const uint8_t* mac, int rssi, const char* detection_type)
+void output_wifi_detection_json(const char* ssid, const uint8_t mac[6], int rssi, int frame_type)
 {
-    DynamicJsonDocument doc(2048);
-    
-    // Core detection info
-    doc["timestamp"] = millis();
-    doc["detection_time"] = String(millis() / 1000.0, 3) + "s";
-    doc["protocol"] = "wifi";
-    doc["detection_method"] = detection_type;
-    doc["alert_level"] = "HIGH";
-    doc["device_category"] = "FLOCK_SAFETY";
-    
-    // WiFi specific info
-    doc["ssid"] = ssid;
-    doc["ssid_length"] = strlen(ssid);
-    doc["rssi"] = rssi;
-    doc["signal_strength"] = rssi > -50 ? "STRONG" : (rssi > -70 ? "MEDIUM" : "WEAK");
-    doc["channel"] = current_channel;
-    
-    // MAC address info
-    char mac_str[18];
-    snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x", 
-             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    doc["mac_address"] = mac_str;
-    
     char mac_prefix[9];
     snprintf(mac_prefix, sizeof(mac_prefix), "%02x:%02x:%02x", mac[0], mac[1], mac[2]);
-    doc["mac_prefix"] = mac_prefix;
-    doc["vendor_oui"] = mac_prefix;
     
     // Detection pattern matching
-    bool ssid_match = false;
-    bool mac_match = false;
-    
+    String matched_ssid;
     for (int i = 0; i < sizeof(wifi_ssid_patterns)/sizeof(wifi_ssid_patterns[0]); i++) {
         if (strcasestr(ssid, wifi_ssid_patterns[i])) {
-            doc["matched_ssid_pattern"] = wifi_ssid_patterns[i];
-            doc["ssid_match_confidence"] = "HIGH";
-            ssid_match = true;
+            matched_ssid += wifi_ssid_patterns[i];
             break;
         }
     }
     
+    String matched_mac;
     for (int i = 0; i < sizeof(mac_prefixes)/sizeof(mac_prefixes[0]); i++) {
         if (strncasecmp(mac_prefix, mac_prefixes[i], 8) == 0) {
-            doc["matched_mac_pattern"] = mac_prefixes[i];
-            doc["mac_match_confidence"] = "HIGH";
-            mac_match = true;
+            matched_mac += mac_prefixes[i];
             break;
         }
     }
-    
-    // Detection summary
-    doc["detection_criteria"] = ssid_match && mac_match ? "SSID_AND_MAC" : (ssid_match ? "SSID_ONLY" : "MAC_ONLY");
-    doc["threat_score"] = ssid_match && mac_match ? 100 : (ssid_match || mac_match ? 85 : 70);
-    
-    // Frame type details
-    if (strcmp(detection_type, "probe_request") == 0 || strcmp(detection_type, "probe_request_mac") == 0) {
-        doc["frame_type"] = "PROBE_REQUEST";
-        doc["frame_description"] = "Device actively scanning for networks";
-    } else {
-        doc["frame_type"] = "BEACON";
-        doc["frame_description"] = "Device advertising its network";
-    }
-    
-    String json_output;
-    serializeJson(doc, json_output);
-    Serial.println(json_output);
+
+    std::array<unsigned int, 6> packed_mac { mac[0], mac[1], mac[2], mac[3], mac[4], mac[5] };
+
+    MsgPack::Packer packer;
+    packer.to_array(
+        "wifi",
+        rssi,
+        ssid,
+        matched_ssid,
+        current_channel,
+        packed_mac,
+        matched_mac,
+        frame_type
+    );
+
+    notify(packer);
 }
 
-void output_ble_detection_json(const char* mac, const char* name, int rssi, const char* detection_method)
+void output_out_of_range_json()
 {
-    DynamicJsonDocument doc(2048);
-    
-    // Core detection info
-    doc["timestamp"] = millis();
-    doc["detection_time"] = String(millis() / 1000.0, 3) + "s";
-    doc["protocol"] = "bluetooth_le";
-    doc["detection_method"] = detection_method;
-    doc["alert_level"] = "HIGH";
-    doc["device_category"] = "FLOCK_SAFETY";
-    
-    // BLE specific info
-    doc["mac_address"] = mac;
-    doc["rssi"] = rssi;
-    doc["signal_strength"] = rssi > -50 ? "STRONG" : (rssi > -70 ? "MEDIUM" : "WEAK");
-    
-    // Device name info
-    if (name && strlen(name) > 0) {
-        doc["device_name"] = name;
-        doc["device_name_length"] = strlen(name);
-        doc["has_device_name"] = true;
-    } else {
-        doc["device_name"] = "";
-        doc["device_name_length"] = 0;
-        doc["has_device_name"] = false;
-    }
-    
+    MsgPack::Packer packer;
+    packer.packString("out_of_range");
+    notify(packer);
+
+}
+
+void output_ble_detection_json(const uint8_t mac[6], const char* name, int rssi, const char* detection_method)
+{
     // MAC address analysis
     char mac_prefix[9];
-    strncpy(mac_prefix, mac, 8);
-    mac_prefix[8] = '\0';
-    doc["mac_prefix"] = mac_prefix;
-    doc["vendor_oui"] = mac_prefix;
-    
-    // Detection pattern matching
-    bool name_match = false;
-    bool mac_match = false;
+    snprintf(mac_prefix, sizeof(mac_prefix), "%02x:%02x:%02x", mac[0], mac[1], mac[2]);
     
     // Check MAC prefix patterns
+    String matched_mac;
     for (int i = 0; i < sizeof(mac_prefixes)/sizeof(mac_prefixes[0]); i++) {
-        if (strncasecmp(mac, mac_prefixes[i], strlen(mac_prefixes[i])) == 0) {
-            doc["matched_mac_pattern"] = mac_prefixes[i];
-            doc["mac_match_confidence"] = "HIGH";
-            mac_match = true;
+        if (strncasecmp(mac_prefix, mac_prefixes[i], 8) == 0) {
+            matched_mac += mac_prefixes[i];
             break;
         }
     }
-    
+
     // Check device name patterns
+    String matched_name;
     if (name && strlen(name) > 0) {
         for (int i = 0; i < sizeof(device_name_patterns)/sizeof(device_name_patterns[0]); i++) {
             if (strcasestr(name, device_name_patterns[i])) {
-                doc["matched_name_pattern"] = device_name_patterns[i];
-                doc["name_match_confidence"] = "HIGH";
-                name_match = true;
+                matched_name += device_name_patterns[i];
                 break;
             }
         }
     }
+
+    std::array<unsigned int, 6> packed_mac { mac[0], mac[1], mac[2], mac[3], mac[4], mac[5] };
+
+    MsgPack::Packer packer;
+    packer.to_array(
+        "bluetooth_le",
+        name,
+        matched_name,
+        rssi,
+        packed_mac,
+        matched_mac
+    );
     
-    // Detection summary
-    doc["detection_criteria"] = name_match && mac_match ? "NAME_AND_MAC" : 
-                               (name_match ? "NAME_ONLY" : "MAC_ONLY");
-    doc["threat_score"] = name_match && mac_match ? 100 : 
-                         (name_match || mac_match ? 85 : 70);
-    
-    // BLE advertisement type analysis
-    doc["advertisement_type"] = "BLE_ADVERTISEMENT";
-    doc["advertisement_description"] = "Bluetooth Low Energy device advertisement";
-    
-    // Detection method details
-    if (strcmp(detection_method, "mac_prefix") == 0) {
-        doc["primary_indicator"] = "MAC_ADDRESS";
-        doc["detection_reason"] = "MAC address matches known Flock Safety prefix";
-    } else if (strcmp(detection_method, "device_name") == 0) {
-        doc["primary_indicator"] = "DEVICE_NAME";
-        doc["detection_reason"] = "Device name matches Flock Safety pattern";
-    }
-    
-    String json_output;
-    serializeJson(doc, json_output);
-    Serial.println(json_output);
+    notify(packer);
 }
 
 // ============================================================================
@@ -385,11 +360,15 @@ void wifi_sniffer_packet_handler(void* buff, wifi_promiscuous_pkt_type_t type)
         memcpy(ssid, &payload[2], payload[1]);
         ssid[payload[1]] = '\0';
     }
+
+    if (DEBUG_WIFI && millis() - last_fake_wifi >= 1000) {
+        output_wifi_detection_json(ssid, hdr->addr2, ppkt->rx_ctrl.rssi, frame_type);
+        last_fake_wifi = millis();
+    }
     
     // Check if SSID matches our patterns
     if (strlen(ssid) > 0 && check_ssid_pattern(ssid)) {
-        const char* detection_type = (frame_type == 0x20) ? "probe_request" : "beacon";
-        output_wifi_detection_json(ssid, hdr->addr2, ppkt->rx_ctrl.rssi, detection_type);
+        output_wifi_detection_json(ssid, hdr->addr2, ppkt->rx_ctrl.rssi, frame_type);
         
         if (!triggered) {
             triggered = true;
@@ -402,8 +381,7 @@ void wifi_sniffer_packet_handler(void* buff, wifi_promiscuous_pkt_type_t type)
     
     // Check MAC address
     if (check_mac_prefix(hdr->addr2)) {
-        const char* detection_type = (frame_type == 0x20) ? "probe_request_mac" : "beacon_mac";
-        output_wifi_detection_json(ssid[0] ? ssid : "hidden", hdr->addr2, ppkt->rx_ctrl.rssi, detection_type);
+        output_wifi_detection_json(ssid, hdr->addr2, ppkt->rx_ctrl.rssi, frame_type);
         
         if (!triggered) {
             triggered = true;
@@ -421,7 +399,6 @@ void wifi_sniffer_packet_handler(void* buff, wifi_promiscuous_pkt_type_t type)
 
 class AdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
     void onResult(NimBLEAdvertisedDevice* advertisedDevice) {
-        
         NimBLEAddress addr = advertisedDevice->getAddress();
         std::string addrStr = addr.toString();
         uint8_t mac[6];
@@ -436,7 +413,7 @@ class AdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
         
         // Check MAC prefix
         if (check_mac_prefix(mac)) {
-            output_ble_detection_json(addrStr.c_str(), name.c_str(), rssi, "mac_prefix");
+            output_ble_detection_json(mac, name.c_str(), rssi, "mac_prefix");
             if (!triggered) {
                 triggered = true;
                 flock_detected_beep_sequence();
@@ -445,10 +422,15 @@ class AdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
             last_detection_time = millis();
             return;
         }
+
+        if (DEBUG_BLE && millis() - last_fake_ble >= 1000) {
+            output_ble_detection_json(mac, name.c_str(), rssi, "device_name");
+            last_fake_ble = millis();
+        }
         
         // Check device name
         if (!name.empty() && check_device_name_pattern(name.c_str())) {
-            output_ble_detection_json(addrStr.c_str(), name.c_str(), rssi, "device_name");
+            output_ble_detection_json(mac, name.c_str(), rssi, "device_name");
             if (!triggered) {
                 triggered = true;
                 flock_detected_beep_sequence();
@@ -490,7 +472,7 @@ void setup()
     // Initialize buzzer
     pinMode(BUZZER_PIN, OUTPUT);
     digitalWrite(BUZZER_PIN, LOW);
-    boot_beep_sequence();
+    // boot_beep_sequence();
     
     printf("Starting Flock Squawk Enhanced Detection System...\n\n");
     
@@ -508,12 +490,27 @@ void setup()
     
     // Initialize BLE
     printf("Initializing BLE scanner...\n");
-    NimBLEDevice::init("");
+    NimBLEDevice::init(BLE_DEVICE_NAME);
+
+    NimBLEDevice::setSecurityAuth(true, true, true);
+    // NimBLEDevice::setSecurityPasskey(1312);
+    pServer = NimBLEDevice::createServer();
+    NimBLEService* pService = pServer->createService(BLE_SERVICE_UUID);
+    NimBLECharacteristic *pScanResultCharacteristic = pService->createCharacteristic(
+        BLE_CHARACTERISTIC_UUID,
+        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::READ_ENC | NIMBLE_PROPERTY::READ_AUTHEN | NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::INDICATE
+    );
+
+    pService->start();
+    NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
+    pAdvertising->addServiceUUID(BLE_SERVICE_UUID);
+    pAdvertising->start();
+
     pBLEScan = NimBLEDevice::getScan();
     pBLEScan->setAdvertisedDeviceCallbacks(new AdvertisedDeviceCallbacks());
     pBLEScan->setActiveScan(true);
     pBLEScan->setInterval(100);
-    pBLEScan->setWindow(99);
+    pBLEScan->setWindow(10);
     
     printf("BLE scanner initialized\n");
     printf("System ready - hunting for Flock Safety devices...\n\n");
