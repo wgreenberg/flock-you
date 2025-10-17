@@ -37,12 +37,6 @@
 #define BLE_SCAN_INTERVAL 5000 // Milliseconds between scans
 static unsigned long last_ble_scan = 0;
 
-// Debug
-#define DEBUG_BLE 0
-static unsigned long last_fake_ble = 0;
-#define DEBUG_WIFI 0
-static unsigned long last_fake_wifi = 0;
-
 // Detection Pattern Limits
 #define MAX_SSID_PATTERNS 10
 #define MAX_MAC_PATTERNS 50
@@ -165,7 +159,7 @@ void notify(MsgPack::Packer packer) {
     // unpacker.feed(packer.data(), packer.size());
     // unpacker.deserialize(doc);
     // serializeJson(doc, jsonOutput);
-    printf("notifying (%d bytes)...\n", packer.size());
+    // printf("notifying (%d bytes)...\n", packer.size());
     // Serial.println(jsonOutput);
 
     pChr->setValue(packer.data(), packer.size());
@@ -184,28 +178,8 @@ void heartbeat_pulse()
 // JSON OUTPUT FUNCTIONS
 // ============================================================================
 
-void output_wifi_detection_json(const char* ssid, const uint8_t mac[6], int rssi, int frame_type)
+void send_wifi_device_info(const char* ssid, const uint8_t mac[6], int rssi, int frame_type)
 {
-    char mac_prefix[9];
-    snprintf(mac_prefix, sizeof(mac_prefix), "%02x:%02x:%02x", mac[0], mac[1], mac[2]);
-    
-    // Detection pattern matching
-    String matched_ssid;
-    for (int i = 0; i < sizeof(wifi_ssid_patterns)/sizeof(wifi_ssid_patterns[0]); i++) {
-        if (strcasestr(ssid, wifi_ssid_patterns[i])) {
-            matched_ssid += wifi_ssid_patterns[i];
-            break;
-        }
-    }
-    
-    String matched_mac;
-    for (int i = 0; i < sizeof(mac_prefixes)/sizeof(mac_prefixes[0]); i++) {
-        if (strncasecmp(mac_prefix, mac_prefixes[i], 8) == 0) {
-            matched_mac += mac_prefixes[i];
-            break;
-        }
-    }
-
     std::array<unsigned int, 6> packed_mac { mac[0], mac[1], mac[2], mac[3], mac[4], mac[5] };
 
     MsgPack::Packer packer;
@@ -213,10 +187,8 @@ void output_wifi_detection_json(const char* ssid, const uint8_t mac[6], int rssi
         "wifi",
         rssi,
         ssid,
-        matched_ssid,
         current_channel,
         packed_mac,
-        matched_mac,
         frame_type
     );
 
@@ -231,42 +203,16 @@ void output_out_of_range_json()
 
 }
 
-void output_ble_detection_json(const uint8_t mac[6], const char* name, int rssi, const char* detection_method)
+void output_ble_detection_json(const uint8_t mac[6], const char* name, int rssi)
 {
-    // MAC address analysis
-    char mac_prefix[9];
-    snprintf(mac_prefix, sizeof(mac_prefix), "%02x:%02x:%02x", mac[0], mac[1], mac[2]);
-    
-    // Check MAC prefix patterns
-    String matched_mac;
-    for (int i = 0; i < sizeof(mac_prefixes)/sizeof(mac_prefixes[0]); i++) {
-        if (strncasecmp(mac_prefix, mac_prefixes[i], 8) == 0) {
-            matched_mac += mac_prefixes[i];
-            break;
-        }
-    }
-
-    // Check device name patterns
-    String matched_name;
-    if (name && strlen(name) > 0) {
-        for (int i = 0; i < sizeof(device_name_patterns)/sizeof(device_name_patterns[0]); i++) {
-            if (strcasestr(name, device_name_patterns[i])) {
-                matched_name += device_name_patterns[i];
-                break;
-            }
-        }
-    }
-
     std::array<unsigned int, 6> packed_mac { mac[0], mac[1], mac[2], mac[3], mac[4], mac[5] };
 
     MsgPack::Packer packer;
     packer.to_array(
         "bluetooth_le",
         name,
-        matched_name,
         rssi,
-        packed_mac,
-        matched_mac
+        packed_mac
     );
     
     notify(packer);
@@ -283,30 +229,59 @@ bool check_mac_prefix(const uint8_t* mac)
     
     for (int i = 0; i < sizeof(mac_prefixes)/sizeof(mac_prefixes[0]); i++) {
         if (strncasecmp(mac_str, mac_prefixes[i], 8) == 0) {
+            std::array<unsigned int, 6> packed_mac { mac[0], mac[1], mac[2], mac[3], mac[4], mac[5] };
+            MsgPack::Packer packer;
+            packer.to_array(
+                "detection",
+                packed_mac,
+                "mac",
+                mac_prefixes[i]
+            );
+            notify(packer);
             return true;
         }
     }
     return false;
 }
 
-bool check_ssid_pattern(const char* ssid)
+bool check_ssid_pattern(const uint8_t* mac, const char* ssid)
 {
     if (!ssid) return false;
     
     for (int i = 0; i < sizeof(wifi_ssid_patterns)/sizeof(wifi_ssid_patterns[0]); i++) {
         if (strcasestr(ssid, wifi_ssid_patterns[i])) {
+            std::array<unsigned int, 6> packed_mac { mac[0], mac[1], mac[2], mac[3], mac[4], mac[5] };
+            MsgPack::Packer packer;
+            packer.to_array(
+                "detection",
+                packed_mac,
+                "ssid",
+                ssid,
+                wifi_ssid_patterns[i]
+            );
+            notify(packer);
             return true;
         }
     }
     return false;
 }
 
-bool check_device_name_pattern(const char* name)
+bool check_device_name_pattern(const uint8_t* mac, const char* name)
 {
     if (!name) return false;
     
     for (int i = 0; i < sizeof(device_name_patterns)/sizeof(device_name_patterns[0]); i++) {
         if (strcasestr(name, device_name_patterns[i])) {
+            std::array<unsigned int, 6> packed_mac { mac[0], mac[1], mac[2], mac[3], mac[4], mac[5] };
+            MsgPack::Packer packer;
+            packer.to_array(
+                "detection",
+                packed_mac,
+                "name",
+                name,
+                device_name_patterns[i]
+            );
+            notify(packer);
             return true;
         }
     }
@@ -324,52 +299,46 @@ typedef struct {
     uint8_t addr2[6]; /* sender address */
     uint8_t addr3[6]; /* filtering address */
     unsigned sequence_ctrl:16;
-    uint8_t addr4[6]; /* optional */
 } wifi_ieee80211_mac_hdr_t;
 
 typedef struct {
     wifi_ieee80211_mac_hdr_t hdr;
-    uint8_t payload[0]; /* network data ended with 4 bytes csum (CRC32) */
 } wifi_ieee80211_packet_t;
 
 void wifi_sniffer_packet_handler(void* buff, wifi_promiscuous_pkt_type_t type)
 {
-    
+    if (type != WIFI_PKT_MGMT) {
+        return;
+    }
+
     const wifi_promiscuous_pkt_t *ppkt = (wifi_promiscuous_pkt_t *)buff;
     const wifi_ieee80211_packet_t *ipkt = (wifi_ieee80211_packet_t *)ppkt->payload;
     const wifi_ieee80211_mac_hdr_t *hdr = &ipkt->hdr;
+    uint8_t *payload = (uint8_t *)ipkt + 24;
     
     // Check for probe requests (subtype 0x04) and beacons (subtype 0x08)
-    uint8_t frame_type = (hdr->frame_ctrl & 0xFF) >> 2;
-    if (frame_type != 0x20 && frame_type != 0x80) { // Probe request or beacon
+    uint8_t frame_type = ppkt->payload[0];
+    if (frame_type != 0x80 && frame_type != 0x40) {
         return;
     }
     
     // Extract SSID from probe request or beacon
     char ssid[33] = {0};
-    uint8_t *payload = (uint8_t *)ipkt + 24; // Skip MAC header
-    
-    if (frame_type == 0x20) { // Probe request
-        payload += 0; // Probe requests start with SSID immediately
-    } else { // Beacon frame
-        payload += 12; // Skip fixed parameters in beacon
-    }
-    
-    // Parse SSID element (tag 0, length, data)
-    if (payload[0] == 0 && payload[1] <= 32) {
-        memcpy(ssid, &payload[2], payload[1]);
-        ssid[payload[1]] = '\0';
-    }
 
-    if (DEBUG_WIFI && millis() - last_fake_wifi >= 1000) {
-        output_wifi_detection_json(ssid, hdr->addr2, ppkt->rx_ctrl.rssi, frame_type);
-        last_fake_wifi = millis();
-    }
+    int ssid_start = frame_type == 0x80 ? 13 : 1;
     
+    uint8_t ssid_len = payload[ssid_start];
+    if (ssid_len > 33) {
+        return;
+    }
+    for (int i=0; i < ssid_len; i++) {
+        ssid[i] = payload[ssid_start + i + 1];
+    }
+    ssid[ssid_len] = '\0';
+    send_wifi_device_info(ssid, hdr->addr2, ppkt->rx_ctrl.rssi, frame_type);
+
     // Check if SSID matches our patterns
-    if (strlen(ssid) > 0 && check_ssid_pattern(ssid)) {
-        output_wifi_detection_json(ssid, hdr->addr2, ppkt->rx_ctrl.rssi, frame_type);
-        
+    if (strlen(ssid) > 0 && check_ssid_pattern(hdr->addr2, ssid)) {
         if (!triggered) {
             triggered = true;
             flock_detected_beep_sequence();
@@ -381,8 +350,6 @@ void wifi_sniffer_packet_handler(void* buff, wifi_promiscuous_pkt_type_t type)
     
     // Check MAC address
     if (check_mac_prefix(hdr->addr2)) {
-        output_wifi_detection_json(ssid, hdr->addr2, ppkt->rx_ctrl.rssi, frame_type);
-        
         if (!triggered) {
             triggered = true;
             flock_detected_beep_sequence();
@@ -400,20 +367,18 @@ void wifi_sniffer_packet_handler(void* buff, wifi_promiscuous_pkt_type_t type)
 class AdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
     void onResult(NimBLEAdvertisedDevice* advertisedDevice) {
         NimBLEAddress addr = advertisedDevice->getAddress();
-        std::string addrStr = addr.toString();
-        uint8_t mac[6];
-        sscanf(addrStr.c_str(), "%02x:%02x:%02x:%02x:%02x:%02x", 
-               &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]);
+        const uint8_t* mac = addr.getNative();
         
         int rssi = advertisedDevice->getRSSI();
         std::string name = "";
         if (advertisedDevice->haveName()) {
             name = advertisedDevice->getName();
+            printf("got name %s\n", name.c_str());
         }
+        output_ble_detection_json(mac, name.c_str(), rssi);
         
         // Check MAC prefix
         if (check_mac_prefix(mac)) {
-            output_ble_detection_json(mac, name.c_str(), rssi, "mac_prefix");
             if (!triggered) {
                 triggered = true;
                 flock_detected_beep_sequence();
@@ -423,14 +388,8 @@ class AdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
             return;
         }
 
-        if (DEBUG_BLE && millis() - last_fake_ble >= 1000) {
-            output_ble_detection_json(mac, name.c_str(), rssi, "device_name");
-            last_fake_ble = millis();
-        }
-        
         // Check device name
-        if (!name.empty() && check_device_name_pattern(name.c_str())) {
-            output_ble_detection_json(mac, name.c_str(), rssi, "device_name");
+        if (!name.empty() && check_device_name_pattern(mac, name.c_str())) {
             if (!triggered) {
                 triggered = true;
                 flock_detected_beep_sequence();

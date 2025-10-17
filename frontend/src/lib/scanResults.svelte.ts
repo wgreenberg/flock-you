@@ -1,40 +1,63 @@
 import { decode } from "@msgpack/msgpack";
 
-export enum EventType {
+export enum WifiFrameType {
+    beacon = 'beacon',
+    probe = 'probe',
+}
+
+export enum DeviceType {
     wifi = 'wifi',
     ble = 'ble',
-    outOfRange = 'outOfRange',
 }
 
-export interface OutOfRangeEvent {
-    type: EventType.outOfRange,
+export enum DetectionType {
+    mac = 'mac',
+    ssid = 'ssid',
+    name = 'name',
 }
 
-export interface BluetoothEvent {
-    type: EventType.ble,
+export interface BluetoothDeviceSignal {
+    type: DeviceType.ble,
     location: GeolocationPosition | undefined,
     timestamp: number,
     rssi: number,
-    mac_address: string,
-    device_name: string | undefined,
-    matched_name: string | undefined,
-    matched_mac: string | undefined,
+    mac: number[],
+    deviceName: string,
 }
 
-export interface WifiEvent {
-    type: EventType.wifi,
+export interface WifiDeviceSignal {
+    type: DeviceType.wifi,
     timestamp: number,
     location: GeolocationPosition | undefined,
     ssid: string,
     rssi: number,
     channel: number,
-    mac_address: string,
-    matched_ssid: string | undefined,
-    matched_mac: string | undefined,
-    frame_type: number,
+    mac: number[],
+    frameType: number,
 }
 
-export type ScanEvent = WifiEvent | BluetoothEvent | OutOfRangeEvent;
+export interface NameDetection {
+    type: DetectionType.name,
+    mac: number[],
+    name: string,
+    matchedName: string,
+}
+
+export interface SSIDDetection {
+    type: DetectionType.ssid,
+    mac: number[],
+    ssid: string,
+    matchedSSID: string,
+}
+
+export interface MACDetection {
+    type: DetectionType.mac,
+    mac: number[],
+    matchedMACPrefix: string,
+}
+
+export type DeviceEvent = WifiDeviceSignal | BluetoothDeviceSignal;
+export type FlockDetectionEvent = NameDetection | SSIDDetection | MACDetection;
 
 export interface RssiRecording {
     rssi: number,
@@ -42,83 +65,151 @@ export interface RssiRecording {
     timestamp: number,
 }
 
-export interface WifiSummary {
-    ssid: string,
-    mac_address: string,
-    matched_ssid: string | undefined,
-    matched_mac: string | undefined,
-    rssis: RssiRecording[],
+class Summary {
+    public mac: number[];
+    public lastSeen: number;
+    public rssis: RssiRecording[];
+    public detections: FlockDetectionEvent[];
+    public type: DeviceType;
+
+    constructor(event: DeviceEvent) {
+        this.mac = $state(event.mac);
+        this.type = $state(event.type);
+        this.lastSeen = $state(event.timestamp);
+        this.detections = $state([]);
+        this.rssis = $state([{
+            rssi: event.rssi,
+            location: event.location,
+            timestamp: event.timestamp,
+        }]);
+    }
+
+    update(event: DeviceEvent) {
+        this.lastSeen = event.timestamp;
+        this.rssis.push({
+            rssi: event.rssi,
+            location: event.location,
+            timestamp: event.timestamp,
+        });
+    }
+
+    public macToString(): string {
+        return this.mac.map(n => n.toString(16)).join(':');
+    }
+
+    public lastRSSI(): RssiRecording {
+        return this.rssis[this.rssis.length - 1];
+    }
 }
 
-export interface BLESummary {
-    mac_address: string,
-    device_name: string | undefined,
-    matched_name: string | undefined,
-    matched_mac: string | undefined,
-    rssis: RssiRecording[],
+export class WifiSummary extends Summary {
+    public ssid: string;
+    public frameType: WifiFrameType;
+
+    constructor(event: WifiDeviceSignal) {
+        super(event);
+        this.ssid = $state(event.ssid);
+        this.frameType = $state(event.frameType == 0x80 ? WifiFrameType.beacon : WifiFrameType.probe);
+    }
 }
 
-export interface ScanResultSummary {
-    inRangeWifis: WifiSummary[],
-    inRangeBLEs: BLESummary[],
+export class BLESummary extends Summary {
+    public deviceName: string;
+
+    constructor(event: BluetoothDeviceSignal) {
+        super(event);
+        this.deviceName = $state(event.deviceName);
+    }
 }
+
+export type DeviceSummary = WifiSummary | BLESummary;
 
 export class ScanResults {
-    public events: ScanEvent[] = $state([]);
+    private bles: Map<string, BLESummary> = new Map();
+    private wifis: Map<string, WifiSummary> = new Map();
+
+    appendDeviceEvent(event: DeviceEvent) {
+        const macString = `${event.mac}`;
+        if (event.type === DeviceType.ble) {
+            let wipBLE = this.bles.get(macString);
+            if (!wipBLE) {
+                wipBLE = new BLESummary(event);
+                this.bles.set(macString, wipBLE);
+            } else {
+                wipBLE.update(event);
+            }
+        } else if (event.type === DeviceType.wifi) {
+            let wipWifi = this.wifis.get(macString);
+            if (!wipWifi) {
+                wipWifi = new WifiSummary(event);
+                this.wifis.set(macString, wipWifi);
+            } else {
+                wipWifi.update(event);
+            }
+            wipWifi.lastSeen = event.timestamp;
+        }
+    }
+
+    appendDetectionEvent(event: FlockDetectionEvent) {
+        const macString = `${event.mac}`;
+        if (this.bles.has(macString)) {
+            this.bles.get(macString)!.detections.push(event);
+        } else if (this.wifis.has(macString)) {
+            this.wifis.get(macString)!.detections.push(event);
+        } else {
+            console.warn(`failed to add detection event ${event}, no matching mac addr`);
+        }
+    }
+
+    public getDevices(macs: string[], pinnedMACs: string[], rssiThreshold: number): [DeviceSummary[], DeviceSummary[]] {
+        const now = getNow();
+        let result = [];
+        let pinnedResult = [];
+        for (const [mac, ble] of this.bles) {
+            if (macs.includes(mac) && ble.lastRSSI().rssi > rssiThreshold) {
+                result.push(ble);
+            }
+        }
+        for (const [mac, wifi] of this.wifis) {
+            if (macs.includes(mac) && wifi.lastRSSI().rssi > rssiThreshold) {
+                result.push(wifi);
+            }
+        }
+        for (const mac of pinnedMACs) {
+            if (this.bles.has(mac)) {
+                pinnedResult.push(this.bles.get(mac)!);
+            } else if (this.wifis.has(mac)) {
+                pinnedResult.push(this.wifis.get(mac)!);
+            }
+        }
+        result.sort((a, b) => {
+            return b.lastRSSI().rssi - a.lastRSSI().rssi;
+        });
+        return [result, pinnedResult];
+    }
+}
+
+function getNow(): number {
+    return (new Date()).getTime();
+}
+
+export class Scanner {
+    public LAST_SEEN_THRESHOLD_MS = 10_000;
     public errors: string[] = $state([]);
     public currentLocation: GeolocationPosition | undefined = $state(undefined);
 
-    public summarize(events: ScanEvent[]): ScanResultSummary {
-        let lastOutOfRange = events.findLastIndex(e => e.type === EventType.outOfRange);
-        let inRangeEvents = events;
-        let inRangeWifis: Map<string, WifiSummary> = new Map();
-        let inRangeBLEs: Map<string, BLESummary> = new Map();
-        if (lastOutOfRange >= 0) {
-            inRangeEvents = events.slice(lastOutOfRange);
-        }
-        for (const event of inRangeEvents) {
-            if (event.type === EventType.ble) {
-                let summary = inRangeBLEs.get(event.mac_address);
-                let rssi = {
-                    rssi: event.rssi,
-                    location: event.location,
-                    timestamp: event.timestamp,
-                };
-                if (summary) {
-                    summary.rssis.push(rssi);
-                } else {
-                    inRangeBLEs.set(event.mac_address, {
-                        device_name: event.device_name,
-                        mac_address: event.mac_address,
-                        matched_name: event.matched_name,
-                        matched_mac: event.matched_mac,
-                        rssis: [rssi],
-                    });
-                }
-            } else if (event.type === EventType.wifi) {
-                let summary = inRangeWifis.get(event.mac_address);
-                let rssi = {
-                    rssi: event.rssi,
-                    location: event.location,
-                    timestamp: event.timestamp,
-                };
-                if (summary) {
-                    summary.rssis.push(rssi);
-                } else {
-                    inRangeWifis.set(event.mac_address, {
-                        ssid: event.ssid,
-                        mac_address: event.mac_address,
-                        matched_ssid: event.matched_ssid,
-                        matched_mac: event.matched_mac,
-                        rssis: [rssi],
-                    });
-                }
+    private results = new ScanResults();
+    private lastSeenTimestamp: Map<string, number> = new Map();
+
+    public summarize(timeThreshold: number, rssiThreshold: number, pinnedMACs: string[]): [DeviceSummary[], DeviceSummary[]] {
+        const now = getNow();
+        let recentDevices = [];
+        for (const [mac, timestamp] of this.lastSeenTimestamp) {
+            if (now - timestamp < timeThreshold) {
+                recentDevices.push(mac);
             }
         }
-        return {
-            inRangeWifis: inRangeWifis.values().toArray(),
-            inRangeBLEs: inRangeBLEs.values().toArray(),
-        };
+        return this.results.getDevices(recentDevices, pinnedMACs, rssiThreshold);
     }
 
     public async watchLocation(): Promise<void> {
@@ -136,46 +227,40 @@ export class ScanResults {
     }
 
     public static async setupDummy() {
-        const result = new ScanResults();
+        const result = new Scanner();
         setInterval(async () => {
             const location = result.currentLocation;
-            const timestamp = (new Date()).getTime()
+            const now = getNow();
             const rng = Math.random();
             if (rng < 0.1) {
-                result.events.push({
-                    type: EventType.outOfRange,
-                });
+                // TODO emit detection event
             } else if (rng < 0.6) {
-                result.events.push({
-                    type: EventType.ble,
+                result.appendDeviceEvent({
+                    type: DeviceType.ble,
                     location,
-                    timestamp,
+                    timestamp: now,
                     rssi: -Math.random() * 100,
-                    mac_address: 'de:ad:be:ef:de:ad:be:ef',
-                    device_name: 'whatever',
-                    matched_name: 'whatever man',
-                    matched_mac: undefined,
+                    mac: [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01],
+                    deviceName: 'whatever',
                 });
             } else {
-                result.events.push({
-                    type: EventType.wifi,
+                result.appendDeviceEvent({
+                    type: DeviceType.wifi,
                     location,
-                    timestamp,
+                    timestamp: now,
                     ssid: 'femboy hooters',
                     rssi: -Math.random() * 100,
                     channel: 10,
-                    mac_address: 'de:ad:be:ef:de:ad:be:ef',
-                    matched_ssid: undefined,
-                    matched_mac: 'de:ad:be:ef:de:ad:be:ef',
-                    frame_type: 20,
+                    mac: [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x02],
+                    frameType: 0x20,
                 });
             }
-        }, 1000);
+        }, 100);
         await result.watchLocation();
         return result;
     }
 
-    public static async setupFromBLEDevice(): Promise<ScanResults> {
+    public static async setupFromBLEDevice(): Promise<Scanner> {
         const serviceUUIDAlias = 0xACAB0001;
         const serviceUUID = 0x5F9B34FB; // not entirely clear why this is different
         const characteristicUUID = 0x0001;
@@ -187,10 +272,10 @@ export class ScanResults {
         const service = await server.getPrimaryService(serviceUUID);
         const characteristic = await service.getCharacteristic(characteristicUUID);
         await characteristic.startNotifications();
-        const result = new ScanResults();
+        const result = new Scanner();
         characteristic.addEventListener('characteristicvaluechanged', async (_: Event) => {
             try {
-                result.events.push(result.parseScanEvent(characteristic.value!));
+                result.processEvent(characteristic.value!);
             } catch (err) {
                 result.errors.push(`${err}`);
             }
@@ -199,40 +284,71 @@ export class ScanResults {
         return result;
     }
 
-    parseScanEvent(data: DataView): ScanEvent {
-        console.log(data);
+    public getLastSeen(mac: number[]): number | undefined {
+        return this.lastSeenTimestamp.get(`${mac}`);
+    }
+
+    appendDeviceEvent(event: DeviceEvent) {
+        this.lastSeenTimestamp.set(`${event.mac}`, event.timestamp);
+        this.results.appendDeviceEvent(event);
+    }
+
+    appendDetectionEvent(event: FlockDetectionEvent) {
+        this.results.appendDetectionEvent(event);
+    }
+
+    processEvent(data: DataView) {
         const array: any[] = decode(data) as any[];
+        console.log(array);
         const location = this.currentLocation;
-        const timestamp = (new Date()).getTime();
+        const now = getNow();
         const eventType = array[0];
         if (eventType === 'bluetooth_le') {
-            return {
-                type: EventType.ble,
+            this.appendDeviceEvent({
+                type: DeviceType.ble,
                 location,
-                timestamp,
-                device_name: array[1],
-                matched_name: array[2],
-                rssi: array[3],
-                mac_address: array[4],
-                matched_mac: array[5],
-            };
+                timestamp: now,
+                deviceName: array[1],
+                rssi: array[2],
+                mac: array[3],
+            });
         } else if (eventType === 'wifi') {
-            return {
-                type: EventType.wifi,
+            this.appendDeviceEvent({
+                type: DeviceType.wifi,
                 location,
-                timestamp,
+                timestamp: now,
                 rssi: array[1],
                 ssid: array[2],
-                matched_ssid: array[3],
-                channel: array[4],
-                mac_address: array[5],
-                matched_mac: array[6],
-                frame_type: array[7],
-            };
-        } else if (eventType === "out_of_range") {
-            return {
-                type: EventType.outOfRange,
-            };
+                channel: array[3],
+                mac: array[4],
+                frameType: array[5],
+            });
+        } else if (eventType === 'detection') {
+            const mac: number[] = array[1];
+            const detectionType: string = array[2];
+            if (detectionType === 'mac') {
+                this.appendDetectionEvent({
+                    type: DetectionType.mac,
+                    mac,
+                    matchedMACPrefix: array[3],
+                });
+            } else if (detectionType === 'name') {
+                this.appendDetectionEvent({
+                    type: DetectionType.name,
+                    mac,
+                    name: array[3],
+                    matchedName: array[4],
+                });
+            } else if (detectionType === 'ssid') {
+                this.appendDetectionEvent({
+                    type: DetectionType.ssid,
+                    mac,
+                    ssid: array[3],
+                    matchedSSID: array[4],
+                });
+            } else {
+                throw new Error(`invalid detection event: ${array}`);
+            }
         } else if (eventType === "data_too_large") {
             throw new Error("data payload too large");
         } else {

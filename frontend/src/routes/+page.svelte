@@ -1,15 +1,15 @@
 <script lang="ts">
     import ScanResultsTable from "$lib/components/ScanResultsTable.svelte";
-    import { ScanResults } from "$lib/scanResults.svelte";
+    import { Scanner } from "$lib/scanResults.svelte";
 
-    let scanResults: ScanResults | undefined = $state(undefined);
+    let scanResults: Scanner | undefined = $state(undefined);
 
     async function pair() {
-        scanResults = await ScanResults.setupFromBLEDevice();
+        scanResults = await Scanner.setupFromBLEDevice();
     }
 
     async function dummy() {
-        scanResults = await ScanResults.setupDummy();
+        scanResults = await Scanner.setupDummy();
     }
 </script>
 <div>
