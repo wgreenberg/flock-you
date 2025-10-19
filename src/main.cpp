@@ -20,6 +20,7 @@
 #define BUZZER_PIN 3  // GPIO3 (D2) - PWM capable pin on Xiao ESP32 S3
 
 // Audio Configuration
+#define MUTE 0
 #define LOW_FREQ 200      // Boot sequence - low pitch
 #define HIGH_FREQ 800     // Boot sequence - high pitch & detection alert
 #define DETECT_FREQ 1000  // Detection alert - high pitch (faster beeps)
@@ -61,11 +62,11 @@ static const char* mac_prefixes[] = {
     // FS Ext Battery devices
     "58:8e:81", "cc:cc:cc", "ec:1b:bd", "90:35:ea", "04:0d:84", 
     "f0:82:c0", "1c:34:f1", "38:5b:44", "94:34:69", "b4:e3:f9",
-    
+
     // Flock WiFi devices
     "70:c9:4e", "3c:91:80", "d8:f3:bc", "80:30:49", "14:5a:fc",
     "74:4c:a1", "08:3a:88", "9c:2f:9d", "94:08:53", "e4:aa:ea"
-    
+
     // Penguin devices - these are NOT OUI based, so use local ouis
     // from the wigle.net db relative to your location 
     // "cc:09:24", "ed:c7:63", "e8:ce:56", "ea:0c:ea", "d8:8f:14",
@@ -80,6 +81,10 @@ static const char* device_name_patterns[] = {
     "Penguin",         // Penguin surveillance devices
     "Flock",           // Standard Flock Safety devices
     "Pigvision"        // Pigvision surveillance systems
+};
+
+static const u16_t ble_manufacturer_ids[] = {
+    0x09C8, // XUNTONG
 };
 
 // ============================================================================
@@ -105,6 +110,7 @@ static const char* BLE_CHARACTERISTIC_UUID = "0001";
 
 void beep(int frequency, int duration_ms)
 {
+    if (MUTE) return;
     tone(BUZZER_PIN, frequency, duration_ms);
     delay(duration_ms + 50);
 }
@@ -137,12 +143,12 @@ void flock_detected_beep_sequence()
 void notify(MsgPack::Packer packer) {
     NimBLEService* pSvc = pServer->getServiceByUUID(BLE_SERVICE_UUID);
     if (!pSvc) {
-        printf("fuck\n");
+        printf("no service found\n");
         return;
     }
     NimBLECharacteristic* pChr = pSvc->getCharacteristic(BLE_CHARACTERISTIC_UUID);
     if (!pChr) {
-        printf("fuck!\n");
+        printf("no characteristic found!\n");
         return;
     }
     if (packer.size() > 256) {
@@ -152,15 +158,6 @@ void notify(MsgPack::Packer packer) {
         pChr->notify(tooLargePacker.data());
         return;
     }
-
-    // MsgPack::Unpacker unpacker;
-    // StaticJsonDocument<256> doc;
-    // String jsonOutput;
-    // unpacker.feed(packer.data(), packer.size());
-    // unpacker.deserialize(doc);
-    // serializeJson(doc, jsonOutput);
-    // printf("notifying (%d bytes)...\n", packer.size());
-    // Serial.println(jsonOutput);
 
     pChr->setValue(packer.data(), packer.size());
     pChr->notify();
@@ -195,24 +192,29 @@ void send_wifi_device_info(const char* ssid, const uint8_t mac[6], int rssi, int
     notify(packer);
 }
 
-void output_out_of_range_json()
-{
-    MsgPack::Packer packer;
-    packer.packString("out_of_range");
-    notify(packer);
-
-}
-
-void output_ble_detection_json(const uint8_t mac[6], const char* name, int rssi)
+void send_ble_device_info(
+    const uint8_t mac[6],
+    const char* name,
+    int rssi,
+    std::vector<u16_t> manufacturerCodes,
+    std::vector<std::string> manufacturerData
+)
 {
     std::array<unsigned int, 6> packed_mac { mac[0], mac[1], mac[2], mac[3], mac[4], mac[5] };
+    std::vector<const char*> manufacturerDataCstr;
+
+    for (int i=0; i<manufacturerData.size(); i++) {
+        manufacturerDataCstr.push_back(manufacturerData[i].c_str());
+    }
 
     MsgPack::Packer packer;
     packer.to_array(
         "bluetooth_le",
         name,
         rssi,
-        packed_mac
+        packed_mac,
+        manufacturerCodes,
+        manufacturerDataCstr
     );
     
     notify(packer);
@@ -221,6 +223,26 @@ void output_ble_detection_json(const uint8_t mac[6], const char* name, int rssi)
 // ============================================================================
 // DETECTION HELPER FUNCTIONS
 // ============================================================================
+
+bool check_ble_manufacturer_ids(const uint8_t* mac, std::vector<u16_t> ids) {
+    for (int i=0; i<sizeof(ble_manufacturer_ids)/sizeof(u16_t); i++) {
+        for (int j=0; j<ids.size(); j++) {
+            if (ble_manufacturer_ids[i] == ids[j]) {
+                std::array<unsigned int, 6> packed_mac { mac[0], mac[1], mac[2], mac[3], mac[4], mac[5] };
+                MsgPack::Packer packer;
+                packer.to_array(
+                    "detection",
+                    packed_mac,
+                    "ble_id",
+                    ids[j]
+                );
+                notify(packer);
+                return true;
+            }
+        }
+    }
+    return false;
+}
 
 bool check_mac_prefix(const uint8_t* mac)
 {
@@ -266,19 +288,17 @@ bool check_ssid_pattern(const uint8_t* mac, const char* ssid)
     return false;
 }
 
-bool check_device_name_pattern(const uint8_t* mac, const char* name)
+bool check_device_name_pattern(const uint8_t* mac, std::string name)
 {
-    if (!name) return false;
-    
     for (int i = 0; i < sizeof(device_name_patterns)/sizeof(device_name_patterns[0]); i++) {
-        if (strcasestr(name, device_name_patterns[i])) {
+        if (name.find(device_name_patterns[i]) != std::string::npos) {
             std::array<unsigned int, 6> packed_mac { mac[0], mac[1], mac[2], mac[3], mac[4], mac[5] };
             MsgPack::Packer packer;
             packer.to_array(
                 "detection",
                 packed_mac,
                 "name",
-                name,
+                name.c_str(),
                 device_name_patterns[i]
             );
             notify(packer);
@@ -324,9 +344,7 @@ void wifi_sniffer_packet_handler(void* buff, wifi_promiscuous_pkt_type_t type)
     
     // Extract SSID from probe request or beacon
     char ssid[33] = {0};
-
     int ssid_start = frame_type == 0x80 ? 13 : 1;
-    
     uint8_t ssid_len = payload[ssid_start];
     if (ssid_len > 33) {
         return;
@@ -335,21 +353,12 @@ void wifi_sniffer_packet_handler(void* buff, wifi_promiscuous_pkt_type_t type)
         ssid[i] = payload[ssid_start + i + 1];
     }
     ssid[ssid_len] = '\0';
+
     send_wifi_device_info(ssid, hdr->addr2, ppkt->rx_ctrl.rssi, frame_type);
 
-    // Check if SSID matches our patterns
-    if (strlen(ssid) > 0 && check_ssid_pattern(hdr->addr2, ssid)) {
-        if (!triggered) {
-            triggered = true;
-            flock_detected_beep_sequence();
-        }
-        // Always update detection time for heartbeat tracking
-        last_detection_time = millis();
-        return;
-    }
-    
-    // Check MAC address
-    if (check_mac_prefix(hdr->addr2)) {
+    bool flockDetected = strlen(ssid) > 0 && check_ssid_pattern(hdr->addr2, ssid)
+        || check_mac_prefix(hdr->addr2);
+    if (flockDetected) {
         if (!triggered) {
             triggered = true;
             flock_detected_beep_sequence();
@@ -373,23 +382,27 @@ class AdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
         std::string name = "";
         if (advertisedDevice->haveName()) {
             name = advertisedDevice->getName();
-            printf("got name %s\n", name.c_str());
-        }
-        output_ble_detection_json(mac, name.c_str(), rssi);
-        
-        // Check MAC prefix
-        if (check_mac_prefix(mac)) {
-            if (!triggered) {
-                triggered = true;
-                flock_detected_beep_sequence();
-            }
-            // Always update detection time for heartbeat tracking
-            last_detection_time = millis();
-            return;
         }
 
-        // Check device name
-        if (!name.empty() && check_device_name_pattern(mac, name.c_str())) {
+        std::vector<std::string> manufacturerData;
+        std::vector<u16_t> manufacturerIDs;
+        for (int i=0; i<advertisedDevice->getManufacturerDataCount(); i++) {
+            std::string data = advertisedDevice->getManufacturerData(i);
+            if (data.size() < 2) {
+                printf("!! manufacturer data size too small (%d)\n", data.size());
+                continue;
+            }
+            u16_t code = ((uint16_t)data[1] << 8) + (uint16_t)data[0];
+            manufacturerIDs.push_back(code);
+            manufacturerData.push_back(data);
+        }
+
+        send_ble_device_info(mac, name.c_str(), rssi, manufacturerIDs, manufacturerData);
+
+        bool flockDetected = check_ble_manufacturer_ids(mac, manufacturerIDs)
+            || check_mac_prefix(mac)
+            || check_device_name_pattern(mac, name);
+        if (flockDetected) {
             if (!triggered) {
                 triggered = true;
                 flock_detected_beep_sequence();
@@ -415,7 +428,7 @@ void hop_channel()
         }
         esp_wifi_set_channel(current_channel, WIFI_SECOND_CHAN_NONE);
         last_channel_hop = now;
-         printf("[WiFi] Hopped to channel %d\n", current_channel);
+        printf("[WiFi] Hopped to channel %d\n", current_channel);
     }
 }
 
@@ -431,7 +444,7 @@ void setup()
     // Initialize buzzer
     pinMode(BUZZER_PIN, OUTPUT);
     digitalWrite(BUZZER_PIN, LOW);
-    // boot_beep_sequence();
+    boot_beep_sequence();
     
     printf("Starting Flock Squawk Enhanced Detection System...\n\n");
     

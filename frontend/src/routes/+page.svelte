@@ -1,15 +1,30 @@
 <script lang="ts">
     import ScanResultsTable from "$lib/components/ScanResultsTable.svelte";
     import { Scanner } from "$lib/scanResults.svelte";
+    import { onMount } from "svelte";
 
     let scanResults: Scanner | undefined = $state(undefined);
 
     async function pair() {
+        await tryWakeLock();
         scanResults = await Scanner.setupFromBLEDevice();
     }
 
     async function dummy() {
+        await tryWakeLock();
         scanResults = await Scanner.setupDummy();
+    }
+
+    async function tryWakeLock() {
+        if (navigator.wakeLock) {
+            try {
+                await navigator.wakeLock.request('screen');
+            } catch(err) {
+                console.error(err);
+            }
+        } else {
+            console.warn('no wake lock API found');
+        }
     }
 </script>
 <div>

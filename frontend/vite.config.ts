@@ -9,6 +9,9 @@ export default defineConfig({
         ],
     },
 	plugins: [tailwindcss(), sveltekit()],
+	optimizeDeps: {
+	    include: ['svelte-maplibre'],
+	},
 	test: {
 		expect: { requireAssertions: true },
 		projects: [

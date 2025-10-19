@@ -1,4 +1,6 @@
 import { decode } from "@msgpack/msgpack";
+import ouiData from "oui-data";
+import { lookupManufacturerIDName } from '$lib/companyIDs';
 
 export enum WifiFrameType {
     beacon = 'beacon',
@@ -14,6 +16,13 @@ export enum DetectionType {
     mac = 'mac',
     ssid = 'ssid',
     name = 'name',
+    ble_id = 'ble_id'
+}
+
+export interface BLEManufacturerData {
+    id: number,
+    idName: string | undefined,
+    data: Uint8Array,
 }
 
 export interface BluetoothDeviceSignal {
@@ -23,6 +32,7 @@ export interface BluetoothDeviceSignal {
     rssi: number,
     mac: number[],
     deviceName: string,
+    manufacturerData: BLEManufacturerData[],
 }
 
 export interface WifiDeviceSignal {
@@ -56,8 +66,15 @@ export interface MACDetection {
     matchedMACPrefix: string,
 }
 
+export interface BLEManufacturerDetection {
+    type: DetectionType.ble_id,
+    mac: number[],
+    id: number,
+    idName: string | undefined,
+}
+
 export type DeviceEvent = WifiDeviceSignal | BluetoothDeviceSignal;
-export type FlockDetectionEvent = NameDetection | SSIDDetection | MACDetection;
+export type FlockDetectionEvent = NameDetection | SSIDDetection | MACDetection | BLEManufacturerDetection;
 
 export interface RssiRecording {
     rssi: number,
@@ -94,11 +111,25 @@ class Summary {
     }
 
     public macToString(): string {
-        return this.mac.map(n => n.toString(16)).join(':');
+        return this.mac
+            .map(n => n.toString(16).padStart(2, '0').toUpperCase())
+            .join(':');
     }
 
     public lastRSSI(): RssiRecording {
         return this.rssis[this.rssis.length - 1];
+    }
+
+    public getOUIManufacturer(): string | undefined {
+        const ouiPrefix = this.mac
+            .slice(0, 3)
+            .map(n => n.toString(16).padStart(2, '0').toUpperCase())
+            .join('');
+        if (ouiPrefix in ouiData) {
+            const ouiResult = ouiData[ouiPrefix as keyof typeof ouiData];
+            return ouiResult.split('\n')[0];
+        }
+        return undefined;
     }
 }
 
@@ -115,18 +146,33 @@ export class WifiSummary extends Summary {
 
 export class BLESummary extends Summary {
     public deviceName: string;
+    manufacturerData: BLEManufacturerData[];
 
     constructor(event: BluetoothDeviceSignal) {
         super(event);
         this.deviceName = $state(event.deviceName);
+        this.manufacturerData = $state(event.manufacturerData);
+    }
+
+    public getBLEManufacturerNames(): string[] {
+        const unique: Set<string> = new Set();
+        for (const data of this.manufacturerData) {
+            if (data.idName) {
+                unique.add(data.idName);
+            } else {
+                const hex = data.id.toString(16).padStart(4, '0');
+                unique.add(`Unknown (${hex})`);
+            }
+        }
+        return unique.values().toArray();
     }
 }
 
 export type DeviceSummary = WifiSummary | BLESummary;
 
 export class ScanResults {
-    private bles: Map<string, BLESummary> = new Map();
-    private wifis: Map<string, WifiSummary> = new Map();
+    public bles: Map<string, BLESummary> = new Map();
+    public wifis: Map<string, WifiSummary> = new Map();
 
     appendDeviceEvent(event: DeviceEvent) {
         const macString = `${event.mac}`;
@@ -146,7 +192,6 @@ export class ScanResults {
             } else {
                 wipWifi.update(event);
             }
-            wipWifi.lastSeen = event.timestamp;
         }
     }
 
@@ -161,18 +206,28 @@ export class ScanResults {
         }
     }
 
-    public getDevices(macs: string[], pinnedMACs: string[], rssiThreshold: number): [DeviceSummary[], DeviceSummary[]] {
-        const now = getNow();
+    public getDevices(
+        macs: string[],
+        pinnedMACs: string[],
+        rssiThreshold: number,
+    ): [DeviceSummary[], DeviceSummary[], DeviceSummary[]] {
         let result = [];
         let pinnedResult = [];
+        let detectedResult = [];
         for (const [mac, ble] of this.bles) {
             if (macs.includes(mac) && ble.lastRSSI().rssi > rssiThreshold) {
                 result.push(ble);
+            }
+            if (ble.detections.length > 0) {
+                detectedResult.push(ble);
             }
         }
         for (const [mac, wifi] of this.wifis) {
             if (macs.includes(mac) && wifi.lastRSSI().rssi > rssiThreshold) {
                 result.push(wifi);
+            }
+            if (wifi.detections.length > 0) {
+                detectedResult.push(wifi);
             }
         }
         for (const mac of pinnedMACs) {
@@ -185,7 +240,7 @@ export class ScanResults {
         result.sort((a, b) => {
             return b.lastRSSI().rssi - a.lastRSSI().rssi;
         });
-        return [result, pinnedResult];
+        return [result, pinnedResult, detectedResult];
     }
 }
 
@@ -201,7 +256,11 @@ export class Scanner {
     private results = new ScanResults();
     private lastSeenTimestamp: Map<string, number> = new Map();
 
-    public summarize(timeThreshold: number, rssiThreshold: number, pinnedMACs: string[]): [DeviceSummary[], DeviceSummary[]] {
+    public summarize(
+        timeThreshold: number,
+        rssiThreshold: number,
+        pinnedMACs: string[],
+    ): [DeviceSummary[], DeviceSummary[], DeviceSummary[]] {
         const now = getNow();
         let recentDevices = [];
         for (const [mac, timestamp] of this.lastSeenTimestamp) {
@@ -210,6 +269,13 @@ export class Scanner {
             }
         }
         return this.results.getDevices(recentDevices, pinnedMACs, rssiThreshold);
+    }
+
+    public getJSON(): string {
+        return JSON.stringify({
+            'ble': JSON.stringify(this.results.bles.values().toArray()),
+            'wifi': JSON.stringify(this.results.wifis.values().toArray()),
+        });
     }
 
     public async watchLocation(): Promise<void> {
@@ -242,6 +308,7 @@ export class Scanner {
                     rssi: -Math.random() * 100,
                     mac: [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01],
                     deviceName: 'whatever',
+                    manufacturerData: [],
                 });
             } else {
                 result.appendDeviceEvent({
@@ -299,11 +366,22 @@ export class Scanner {
 
     processEvent(data: DataView) {
         const array: any[] = decode(data) as any[];
-        console.log(array);
         const location = this.currentLocation;
         const now = getNow();
         const eventType = array[0];
         if (eventType === 'bluetooth_le') {
+            const manufacturerIDs = array[4];
+            const manufacturerDataStrings = array[5];
+            const manufacturerData: BLEManufacturerData[] = [];
+            for (let i = 0; i < manufacturerIDs.length; i++) {
+                const idName = lookupManufacturerIDName(manufacturerIDs[i]);
+                const data = Uint8Array.from(manufacturerDataStrings[i]);
+                manufacturerData.push({
+                    id: manufacturerIDs[i],
+                    idName,
+                    data,
+                });
+            }
             this.appendDeviceEvent({
                 type: DeviceType.ble,
                 location,
@@ -311,6 +389,7 @@ export class Scanner {
                 deviceName: array[1],
                 rssi: array[2],
                 mac: array[3],
+                manufacturerData,
             });
         } else if (eventType === 'wifi') {
             this.appendDeviceEvent({
@@ -346,6 +425,13 @@ export class Scanner {
                     ssid: array[3],
                     matchedSSID: array[4],
                 });
+            } else if (detectionType === 'ble_id') {
+                this.appendDetectionEvent({
+                    type: DetectionType.ble_id,
+                    mac,
+                    id: array[3],
+                    idName: lookupManufacturerIDName(array[3]),
+                })
             } else {
                 throw new Error(`invalid detection event: ${array}`);
             }

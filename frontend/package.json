@@ -20,6 +20,7 @@
 		"@sveltejs/vite-plugin-svelte": "^6.2.0",
 		"@tailwindcss/typography": "^0.5.18",
 		"@tailwindcss/vite": "^4.1.13",
+		"@types/leaflet": "^1.9.21",
 		"@types/web-bluetooth": "^0.0.21",
 		"@vitest/browser": "^3.2.4",
 		"playwright": "^1.55.1",
@@ -32,6 +33,13 @@
 		"vitest-browser-svelte": "^1.1.0"
 	},
 	"dependencies": {
-		"@msgpack/msgpack": "^3.1.2"
+		"@msgpack/msgpack": "^3.1.2",
+		"advlib": "^1.3.9",
+		"advlib-ble": "^1.4.2",
+		"advlib-ble-manufacturers": "^1.13.1",
+		"bluetooth-numbers-database": "github:NordicSemiconductor/bluetooth-numbers-database",
+		"leaflet": "^1.9.4",
+		"oui-data": "^1.1.451",
+		"svelte-maplibre": "^1.2.3"
 	}
 }
