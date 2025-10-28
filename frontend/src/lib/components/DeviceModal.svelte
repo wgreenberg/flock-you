@@ -5,8 +5,8 @@
     import Modal from "./Modal.svelte";
     import SummaryIcon from "./SummaryIcon.svelte";
     let { device, currentLocation, showModal = $bindable() }: {
-        device: DeviceSummary | undefined,
-        currentLocation: GeolocationCoordinates,
+        device?: DeviceSummary,
+        currentLocation?: GeolocationCoordinates,
         showModal: boolean,
     } = $props();
 </script>

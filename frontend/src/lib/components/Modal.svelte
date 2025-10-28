@@ -10,7 +10,7 @@
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
 <dialog
-    class="show bg-white rounded-lg shadow-lg p-6 w-11/12 m-2 max-w-lg"
+    class="show bg-white rounded-lg shadow-lg p-6 w-11/12 mt-2 ml-2 max-w-lg"
    	bind:this={dialog}
    	onclose={() => (showModal = false)}
    	onclick={(e) => { if (e.target === dialog) dialog.close(); }}

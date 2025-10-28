@@ -142,6 +142,22 @@ export class WifiSummary extends Summary {
         this.ssid = $state(event.ssid);
         this.frameType = $state(event.frameType == 0x80 ? WifiFrameType.beacon : WifiFrameType.probe);
     }
+
+    public static fromObj(obj: any): WifiSummary {
+        const numRSSIs = obj['rssis'].length;
+        const lastLoc: RssiRecording = obj['rssis'][numRSSIs - 1];
+        const fakeSignal: WifiDeviceSignal = {
+            type: DeviceType.wifi,
+            timestamp: lastLoc.timestamp,
+            location: lastLoc.location,
+            rssi: lastLoc.rssi,
+            ssid: obj['ssid'],
+            channel: 0, // unused?
+            mac: obj['mac'],
+            frameType: obj['frameType'],
+        };
+        return new WifiSummary(fakeSignal);
+    }
 }
 
 export class BLESummary extends Summary {
@@ -166,6 +182,39 @@ export class BLESummary extends Summary {
         }
         return unique.values().toArray();
     }
+
+    public static fromObj(obj: any): BLESummary {
+        const numRSSIs = obj['rssis'].length;
+        const lastLoc: RssiRecording = obj['rssis'][numRSSIs - 1];
+        const fakeSignal: BluetoothDeviceSignal = {
+            type: DeviceType.ble,
+            location: lastLoc.location,
+            timestamp: lastLoc.timestamp,
+            rssi: lastLoc.rssi,
+            mac: obj['mac'],
+            deviceName: obj['deviceName'],
+            manufacturerData: obj['manufacturerData'],
+        };
+        return new BLESummary(fakeSignal);
+    }
+}
+
+function objectifySummary(summary: DeviceSummary): { [key: string]: any } {
+    let result: { [key: string]: any } = {
+        mac: summary.mac,
+        lastSeen: summary.lastSeen,
+        rssis: summary.rssis,
+        detections: summary.detections,
+        type: summary.type,
+    };
+    if ('deviceName' in summary) {
+        result.deviceName = summary.deviceName;
+        result.manufacturerData = summary.manufacturerData;
+    } else {
+        result.ssid = summary.ssid;
+        result.frameType = summary.frameType;
+    }
+    return result;
 }
 
 export type DeviceSummary = WifiSummary | BLESummary;
@@ -173,6 +222,12 @@ export type DeviceSummary = WifiSummary | BLESummary;
 export class ScanResults {
     public bles: Map<string, BLESummary> = new Map();
     public wifis: Map<string, WifiSummary> = new Map();
+    public scanStartedTimestamp: number;
+    public lastEventTimestamp: number | undefined;
+
+    constructor() {
+        this.scanStartedTimestamp = getNow();
+    }
 
     appendDeviceEvent(event: DeviceEvent) {
         const macString = `${event.mac}`;
@@ -193,6 +248,7 @@ export class ScanResults {
                 wipWifi.update(event);
             }
         }
+        this.lastEventTimestamp = getNow();
     }
 
     appendDetectionEvent(event: FlockDetectionEvent) {
@@ -203,6 +259,37 @@ export class ScanResults {
             this.wifis.get(macString)!.detections.push(event);
         } else {
             console.warn(`failed to add detection event ${event}, no matching mac addr`);
+            return;
+        }
+        this.lastEventTimestamp = getNow();
+    }
+
+    public toJSON(): string {
+        return JSON.stringify({
+            'ble': this.bles.values().map(objectifySummary).toArray(),
+            'wifi': this.wifis.values().map(objectifySummary).toArray(),
+            'scanStartedTimestamp': this.scanStartedTimestamp,
+            'lastEventTimestamp': this.lastEventTimestamp,
+        });
+    }
+
+    public static fromJSON(input: string): ScanResults {
+        const obj = JSON.parse(input);
+        if ('ble' in obj && 'wifi' in obj) {
+            let result = new ScanResults();
+            result.lastEventTimestamp = obj['lastEventTimestamp'];
+            result.scanStartedTimestamp = obj['scanStartedTimestamp'];
+            for (let bleObj of obj['ble']) {
+                const ble = BLESummary.fromObj(bleObj);
+                result.bles.set(`${ble.mac}`, ble);
+            }
+            for (let wifiObj of obj['wifi']) {
+                const wifi = WifiSummary.fromObj(wifiObj);
+                result.wifis.set(`${wifi.mac}`, wifi);
+            }
+            return result;
+        } else {
+            throw new Error(`invalid JSON input "${input}"`);
         }
     }
 
@@ -248,12 +335,18 @@ function getNow(): number {
     return (new Date()).getTime();
 }
 
+export enum ScannerStatus {
+    disconnected = 'disconnected',
+    connected = 'connected',
+}
+
 export class Scanner {
     public LAST_SEEN_THRESHOLD_MS = 10_000;
     public errors: string[] = $state([]);
     public currentLocation: GeolocationPosition | undefined = $state(undefined);
+    public results = new ScanResults();
+    public status: ScannerStatus = $state(ScannerStatus.disconnected);
 
-    private results = new ScanResults();
     private lastSeenTimestamp: Map<string, number> = new Map();
 
     public summarize(
@@ -269,13 +362,6 @@ export class Scanner {
             }
         }
         return this.results.getDevices(recentDevices, pinnedMACs, rssiThreshold);
-    }
-
-    public getJSON(): string {
-        return JSON.stringify({
-            'ble': JSON.stringify(this.results.bles.values().toArray()),
-            'wifi': JSON.stringify(this.results.wifis.values().toArray()),
-        });
     }
 
     public async watchLocation(): Promise<void> {
@@ -324,6 +410,7 @@ export class Scanner {
             }
         }, 100);
         await result.watchLocation();
+        result.status = ScannerStatus.connected;
         return result;
     }
 
@@ -347,6 +434,11 @@ export class Scanner {
                 result.errors.push(`${err}`);
             }
         });
+        setInterval(() => {
+            if (!server.connected) {
+                result.status = ScannerStatus.disconnected;
+            }
+        })
         await result.watchLocation();
         return result;
     }
@@ -355,13 +447,19 @@ export class Scanner {
         return this.lastSeenTimestamp.get(`${mac}`);
     }
 
+    public saveLocalStorage() {
+        window.localStorage.setItem(`${this.results.scanStartedTimestamp}`, `${this.results.toJSON()}`);
+    }
+
     appendDeviceEvent(event: DeviceEvent) {
         this.lastSeenTimestamp.set(`${event.mac}`, event.timestamp);
         this.results.appendDeviceEvent(event);
+        this.saveLocalStorage();
     }
 
     appendDetectionEvent(event: FlockDetectionEvent) {
         this.results.appendDetectionEvent(event);
+        this.saveLocalStorage();
     }
 
     processEvent(data: DataView) {

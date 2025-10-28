@@ -8,12 +8,12 @@
 </script>
 
 {#if 'ssid' in device}
-    <span>SSID: {device.ssid ? device.ssid : "N/A"}</span>
+    <span><b>SSID:</b> {device.ssid ? device.ssid : "N/A"}</span>
 {:else}
-    <span>Name: {device.deviceName ? device.deviceName : "N/A"}</span>
+    <span><b>Name:</b> {device.deviceName ? device.deviceName : "N/A"}</span>
 {/if}
 <span class="flex flex-row">
-    <p class="mr-2">MAC Address:</p>
+    <p class="mr-2"><b>MAC Address:</b></p>
     {#if isMacRandomized}
         <SummaryIcon
             type="dice"
@@ -24,8 +24,8 @@
         <p class="font-mono">{device.macToString()}</p>
     {/if}
 </span>
-<span>MAC Manufacturer Info: {device.getOUIManufacturer() || "N/A"}</span>
+<span><b>MAC Manufacturer Info:</b> {device.getOUIManufacturer() || "N/A"}</span>
 {#if 'manufacturerData' in device}
-    <span>BLE Manufacturer Info: {device.getBLEManufacturerNames() || "N/A"}</span>
+    <span><b>BLE Manufacturer Info:</b> {device.getBLEManufacturerNames() || "N/A"}</span>
 {/if}
-<span>Last RSSI: {device.lastRSSI().rssi}</span>
+<span><b>Last RSSI:</b> {device.lastRSSI().rssi}</span>

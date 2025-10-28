@@ -5,7 +5,7 @@
 
     let { device, currentLocation }: {
         device: DeviceSummary,
-        currentLocation: GeolocationCoordinates,
+        currentLocation?: GeolocationCoordinates,
     } = $props();
 
     interface RSSIMarker {
@@ -51,10 +51,6 @@
         }
         return undefined;
     }).filter(coord => !!coord);
-    let currentLocationLngLat = $derived({
-        lng: currentLocation.longitude,
-        lat: currentLocation.latitude,
-    });
 </script>
 
 <MapLibre
@@ -67,15 +63,18 @@
     {#each coords as { lngLat, color, label }}
         <Marker
             {lngLat}
-            class={"h-8 w-8 rounded-full border border-gray-200 text-black shadow-2xl focus:outline-2 focus:outline-black " + color}
+            class={"h-8 w-8 rounded-full border border-gray-200 text-black focus:outline-2 focus:outline-black " + color}
             >
           <Popup offset={[0, -10]}>
             <div class="text-lg font-bold">{label}</div>
           </Popup>
         </Marker>
     {/each}
-    <Marker
-        lngLat={currentLocationLngLat}
-        class="h-8 w-8 rounded-full border border-gray-200 bg-blue-400 text-black shadow-2xl focus:outline-2 focus:outline-black"
-        />
+    {#if currentLocation}
+        {@const currentLocationLngLat = { lng: currentLocation.longitude, lat: currentLocation.latitude }}
+        <Marker
+            lngLat={currentLocationLngLat}
+            class="h-8 w-8 rounded-full border border-gray-200 bg-blue-400 text-black focus:outline-2 focus:outline-black"
+            />
+    {/if}
 </MapLibre>

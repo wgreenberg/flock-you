@@ -1,18 +1,21 @@
 <script lang="ts">
     import ScanResultsTable from "$lib/components/ScanResultsTable.svelte";
     import { Scanner } from "$lib/scanResults.svelte";
+    import NavBar from "$lib/components/NavBar.svelte";
     import { onMount } from "svelte";
+    import RecordedResultsTable from "$lib/components/RecordedResultsTable.svelte";
 
-    let scanResults: Scanner | undefined = $state(undefined);
+    let scanner: Scanner | undefined = $state(undefined);
+    let selection: string = $state('scanner');
 
     async function pair() {
         await tryWakeLock();
-        scanResults = await Scanner.setupFromBLEDevice();
+        scanner = await Scanner.setupFromBLEDevice();
     }
 
     async function dummy() {
         await tryWakeLock();
-        scanResults = await Scanner.setupDummy();
+        scanner = await Scanner.setupDummy();
     }
 
     async function tryWakeLock() {
@@ -27,10 +30,17 @@
         }
     }
 </script>
-<div>
-    <button id="pair" class="bg-blue-700 hover:bg-blue-800 px-5 py-2.5 me-2 mb-2 text-white rounded-md" onclick={pair}>Pair</button>
-    <button id="pair" class="bg-blue-700 hover:bg-blue-800 px-5 py-2.5 me-2 mb-2 text-white rounded-md" onclick={dummy}>Dummy</button>
+<NavBar bind:selection {scanner} />
+<div class="m-6">
+    {#if selection === 'scanner'}
+        <div>
+            <button id="pair" class="bg-blue-700 hover:bg-blue-800 px-5 py-2.5 me-2 mb-2 text-white rounded-md" onclick={pair}>Pair</button>
+            <button id="pair" class="bg-blue-700 hover:bg-blue-800 px-5 py-2.5 me-2 mb-2 text-white rounded-md" onclick={dummy}>Dummy</button>
+        </div>
+        {#if scanner}
+            <ScanResultsTable {scanner} />
+        {/if}
+    {:else}
+        <RecordedResultsTable />
+    {/if}
 </div>
-{#if scanResults}
-    <ScanResultsTable {scanResults} />
-{/if}

@@ -7,7 +7,7 @@
     import DeviceModal from "./DeviceModal.svelte";
 
     const TIME_THRESHOLD_MS = 10_000;
-    const { scanResults }: { scanResults: Scanner } = $props();
+    const { scanner }: { scanner: Scanner } = $props();
     let inRangeDevices: DeviceSummary[] = $state([]);
     let pinnedDevices: DeviceSummary[] = $state([]);
     let pinnedMACs: string[] = $state([]);
@@ -41,14 +41,14 @@
                 inRangeDevices,
                 pinnedDevices,
                 detectedDevices,
-            ] = scanResults.summarize(
+            ] = scanner.summarize(
                 TIME_THRESHOLD_MS,
                 rssiThreshold,
                 pinnedMACs,
             );
-            currentLocation = scanResults.currentLocation!.coords;
+            currentLocation = scanner.currentLocation!.coords;
         } catch(e) {
-            scanResults.errors.push(JSON.stringify(e));
+            scanner.errors.push(JSON.stringify(e));
         }
     }
 
@@ -66,7 +66,7 @@
     }
 
     function download() {
-        const text = scanResults.getJSON();
+        const text = scanner.results.toJSON();
         const element = document.createElement('a');
         element.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(text));
         element.setAttribute('download', 'flockYouData.json');
@@ -91,7 +91,7 @@
 </script>
 
 <div class="m-3">
-    <pre>{JSON.stringify(scanResults.errors)}</pre>
+    <pre>{JSON.stringify(scanner.errors)}</pre>
     <div>
         <RssiThresholdControl bind:rssiThreshold />
         <DeviceTypeFilterControl bind:showBLE bind:showWifiBeacon bind:showWifiProbe />
