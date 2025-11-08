@@ -34,8 +34,10 @@
 #define CHANNEL_HOP_INTERVAL 500  // milliseconds
 
 // BLE SCANNING CONFIGURATION
-#define BLE_SCAN_DURATION 1    // Seconds
-#define BLE_SCAN_INTERVAL 5000 // Milliseconds between scans
+#define BLE_SCAN_DURATION_SECS 1
+#define BLE_SCAN_INTERVAL_MS 200
+#define BLE_SCAN_WINDOW_MS 100
+#define BLE_SCAN_DELAY_MS 1500
 static unsigned long last_ble_scan = 0;
 
 // Detection Pattern Limits
@@ -54,7 +56,7 @@ static const char* wifi_ssid_patterns[] = {
     "FLOCK",        // All caps variant
     "FS Ext Battery", // Flock Safety Extended Battery devices
     "Penguin",      // Penguin surveillance devices
-    "Pigvision"     // Pigvision surveillance systems
+    "Pigvision",     // Pigvision surveillance systems
 };
 
 // Known Flock Safety MAC address prefixes (from real device databases)
@@ -91,22 +93,29 @@ static const u16_t ble_manufacturer_ids[] = {
 // GLOBAL VARIABLES
 // ============================================================================
 
-static uint8_t current_channel = 1;
-static unsigned long last_channel_hop = 0;
-static bool triggered = false;
-static bool device_in_range = false;
-static unsigned long last_detection_time = 0;
-static unsigned long last_heartbeat = 0;
+// BLE state
 static NimBLEScan* pBLEScan;
 static NimBLEServer* pServer;
 static const char* BLE_DEVICE_NAME = "FlockYou";
 static const NimBLEUUID BLE_SERVICE_UUID = NimBLEUUID(0xACAB0001);
 static const char* BLE_CHARACTERISTIC_UUID = "0001";
 
+// WiFi state
+static uint8_t current_channel = 1;
+static unsigned long last_channel_hop = 0;
 
 // ============================================================================
 // AUDIO SYSTEM
 // ============================================================================
+
+const int B3hz = 247;
+const int C4hz = 262;
+const int D4hz = 294;
+const int E4hz = 330;
+const int F4hz = 349;
+const int G4hz = 392;
+const int A4hz = 440;
+const int B4hz = 494;
 
 void beep(int frequency, int duration_ms)
 {
@@ -119,8 +128,9 @@ void boot_beep_sequence()
 {
     printf("Initializing audio system...\n");
     printf("Playing boot sequence: Low -> High pitch\n");
-    beep(LOW_FREQ, BOOT_BEEP_DURATION);
-    beep(HIGH_FREQ, BOOT_BEEP_DURATION);
+    beep(C4hz, BOOT_BEEP_DURATION);
+    beep(B4hz, BOOT_BEEP_DURATION);
+    beep(G4hz, BOOT_BEEP_DURATION);
     printf("Audio system ready\n\n");
 }
 
@@ -133,11 +143,6 @@ void flock_detected_beep_sequence()
         if (i < 2) delay(50); // Short gap between beeps
     }
     printf("Detection complete - device identified!\n\n");
-    
-    // Mark device as in range and start heartbeat tracking
-    device_in_range = true;
-    last_detection_time = millis();
-    last_heartbeat = millis();
 }
 
 void notify(MsgPack::Packer packer) {
@@ -161,6 +166,39 @@ void notify(MsgPack::Packer packer) {
 
     pChr->setValue(packer.data(), packer.size());
     pChr->notify();
+}
+
+bool check_range(int val, int low, int high) {
+    return val >= low && val <= high;
+}
+
+void multibeep(std::vector<int> freqs, int total_duration) {
+    int duration_per_beep = total_duration / freqs.size();
+    for (int freq: freqs) {
+        beep(freq, duration_per_beep);
+    }
+}
+
+void proximity_beep(int rssi) {
+    int duration = 500;
+    if (rssi < -150) {
+        // play 2 sad descending beeps
+        multibeep({ C4hz, B3hz }, duration);
+    } else if (check_range(rssi, -150, -100)) {
+        multibeep({ C4hz }, duration);
+    } else if (check_range(rssi, -100, -80)) {
+        multibeep({ C4hz, E4hz }, duration);
+    } else if (check_range(rssi, -80, -50)) {
+        multibeep({ C4hz, E4hz, G4hz }, duration);
+    } else if (check_range(rssi, -50, -20)) {
+        multibeep({ C4hz, E4hz, G4hz, B4hz }, duration);
+    } else {
+        multibeep({ C4hz, 2 * C4hz, C4hz, 2 * C4hz }, duration);
+    }
+}
+
+void out_of_range_beep() {
+    multibeep({ B3hz, B3hz, B3hz }, 300);
 }
 
 void heartbeat_pulse()
@@ -307,6 +345,153 @@ bool check_device_name_pattern(const uint8_t* mac, std::string name)
     }
     return false;
 }
+struct FoxhunterState {
+    uint8_t target_mac[6];
+    int rssi;
+};
+
+class State {
+    public:
+        bool muted = false;
+        enum ModeType { Detector, Foxhunter } mode;
+        State() {
+            this->mode = State::ModeType::Detector;
+            this->reset_detection();
+            this->foxhunter_state.rssi = 0;
+        };
+        void handle_wifi_packet(const char* ssid, const uint8_t mac[6], int rssi, int frame_type);
+        void handle_ble_packet(
+            const uint8_t mac[6],
+            std::string name,
+            int rssi,
+            std::vector<u16_t> manufacturerCodes,
+            std::vector<std::string> manufacturerData
+        );
+        void update();
+        void foxhunt(const uint8_t *mac);
+        void detect();
+    private:
+        bool device_in_range;
+        unsigned long last_detection_time;
+        unsigned long last_heartbeat;
+        bool foxhunt_auto_off = false;
+        FoxhunterState foxhunter_state;
+        void foxhunt_mac(const uint8_t mac[6], int rssi);
+        void handle_flock_detected(bool flock_detected, const uint8_t mac[6]);
+        void reset_detection();
+};
+
+void State::reset_detection() {
+    this->device_in_range = false;
+    this->last_detection_time = 0;
+    this->last_heartbeat = 0;
+}
+
+void State::foxhunt(const uint8_t mac[6]) {
+    this->mode = State::ModeType::Foxhunter;
+    for (int i=0; i<6; i++) {
+        this->foxhunter_state.target_mac[i] = mac[i];
+    }
+    this->foxhunter_state.rssi = 0;
+    this->reset_detection();
+}
+
+void State::detect() {
+    this->mode = State::ModeType::Detector;
+    this->reset_detection();
+}
+
+void State::handle_flock_detected(bool flockDetected, const uint8_t mac[6]) {
+    if (!flockDetected) {
+        return;
+    }
+    if (!this->device_in_range) {
+        flock_detected_beep_sequence();
+        this->foxhunt(mac); // foxhunt the camera
+        this->foxhunt_auto_off = true; // if we go out of range, go back to detect mode
+        this->device_in_range = true;
+        this->last_heartbeat = millis();
+    }
+    this->last_detection_time = millis();
+}
+
+void State::update() {
+    // Handle heartbeat pulse if device is in range
+    if (this->device_in_range) {
+        // Check if device has gone out of range (no detection for 30 seconds)
+        if (millis() - this->last_detection_time >= 30000) {
+            printf("Device out of range - stopping heartbeat\n");
+            this->device_in_range = false;
+            out_of_range_beep();
+            if (this->foxhunt_auto_off && this->mode == State::ModeType::Foxhunter) {
+                this->detect();
+            }
+            return;
+        }
+
+        unsigned long interval = this->mode == State::ModeType::Detector ? 10000 : 3000;
+        if (millis() - this->last_heartbeat >= interval) {
+            if (this->mode == State::ModeType::Detector) {
+                heartbeat_pulse();
+            } else {
+                proximity_beep(this->foxhunter_state.rssi);
+            }
+            this->last_heartbeat = millis();
+        }
+    }
+}
+
+void State::handle_wifi_packet(
+    const char* ssid,
+    const uint8_t mac[6],
+    int rssi,
+    int frame_type
+) {
+    send_wifi_device_info(ssid, mac, rssi, frame_type);
+
+    if (this->mode == State::ModeType::Detector) {
+        bool flockDetected = strlen(ssid) > 0 && check_ssid_pattern(mac, ssid)
+            || check_mac_prefix(mac);
+        this->handle_flock_detected(flockDetected, mac);
+    } else {
+        this->foxhunt_mac(mac, rssi);
+    }
+}
+
+void State::handle_ble_packet(
+    const uint8_t mac[6],
+    std::string name,
+    int rssi,
+    std::vector<u16_t> manufacturerIDs,
+    std::vector<std::string> manufacturerData
+) {
+    send_ble_device_info(mac, name.c_str(), rssi, manufacturerIDs, manufacturerData);
+
+    if (this->mode == State::ModeType::Detector) {
+        bool flockDetected = check_ble_manufacturer_ids(mac, manufacturerIDs)
+            || check_mac_prefix(mac)
+            || check_device_name_pattern(mac, name);
+        this->handle_flock_detected(flockDetected, mac);
+    } else {
+        this->foxhunt_mac(mac, rssi);
+    }
+}
+
+void State::foxhunt_mac(const uint8_t mac[6], int rssi) {
+    for (int i=0; i<6; i++) {
+        if (mac[i] != this->foxhunter_state.target_mac[i]) {
+            return;
+        }
+    }
+    this->last_detection_time = millis();
+    this->foxhunter_state.rssi = rssi;
+    if (!this->device_in_range) {
+        this->device_in_range = true;
+    }
+}
+
+static State state;
+
 
 // ============================================================================
 // WIFI PROMISCUOUS MODE HANDLER
@@ -354,19 +539,7 @@ void wifi_sniffer_packet_handler(void* buff, wifi_promiscuous_pkt_type_t type)
     }
     ssid[ssid_len] = '\0';
 
-    send_wifi_device_info(ssid, hdr->addr2, ppkt->rx_ctrl.rssi, frame_type);
-
-    bool flockDetected = strlen(ssid) > 0 && check_ssid_pattern(hdr->addr2, ssid)
-        || check_mac_prefix(hdr->addr2);
-    if (flockDetected) {
-        if (!triggered) {
-            triggered = true;
-            flock_detected_beep_sequence();
-        }
-        // Always update detection time for heartbeat tracking
-        last_detection_time = millis();
-        return;
-    }
+    state.handle_wifi_packet(ssid, hdr->addr2, ppkt->rx_ctrl.rssi, frame_type);
 }
 
 // ============================================================================
@@ -397,20 +570,7 @@ class AdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
             manufacturerData.push_back(data);
         }
 
-        send_ble_device_info(mac, name.c_str(), rssi, manufacturerIDs, manufacturerData);
-
-        bool flockDetected = check_ble_manufacturer_ids(mac, manufacturerIDs)
-            || check_mac_prefix(mac)
-            || check_device_name_pattern(mac, name);
-        if (flockDetected) {
-            if (!triggered) {
-                triggered = true;
-                flock_detected_beep_sequence();
-            }
-            // Always update detection time for heartbeat tracking
-            last_detection_time = millis();
-            return;
-        }
+        state.handle_ble_packet(mac, name, rssi, manufacturerIDs, manufacturerData);
     }
 };
 
@@ -445,9 +605,7 @@ void setup()
     pinMode(BUZZER_PIN, OUTPUT);
     digitalWrite(BUZZER_PIN, LOW);
     boot_beep_sequence();
-    
-    printf("Starting Flock Squawk Enhanced Detection System...\n\n");
-    
+
     // Initialize WiFi in promiscuous mode
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
@@ -481,8 +639,8 @@ void setup()
     pBLEScan = NimBLEDevice::getScan();
     pBLEScan->setAdvertisedDeviceCallbacks(new AdvertisedDeviceCallbacks());
     pBLEScan->setActiveScan(true);
-    pBLEScan->setInterval(100);
-    pBLEScan->setWindow(10);
+    pBLEScan->setInterval(BLE_SCAN_INTERVAL_MS);
+    pBLEScan->setWindow(BLE_SCAN_WINDOW_MS);
     
     printf("BLE scanner initialized\n");
     printf("System ready - hunting for Flock Safety devices...\n\n");
@@ -495,31 +653,15 @@ void loop()
     // Handle channel hopping for WiFi promiscuous mode
     hop_channel();
     
-    // Handle heartbeat pulse if device is in range
-    if (device_in_range) {
-        unsigned long now = millis();
-        
-        // Check if 10 seconds have passed since last heartbeat
-        if (now - last_heartbeat >= 10000) {
-            heartbeat_pulse();
-            last_heartbeat = now;
-        }
-        
-        // Check if device has gone out of range (no detection for 30 seconds)
-        if (now - last_detection_time >= 30000) {
-            printf("Device out of range - stopping heartbeat\n");
-            device_in_range = false;
-            triggered = false; // Allow new detections
-        }
-    }
+    state.update();
     
-    if (millis() - last_ble_scan >= BLE_SCAN_INTERVAL && !pBLEScan->isScanning()) {
+    if (millis() - last_ble_scan >= BLE_SCAN_DELAY_MS && !pBLEScan->isScanning()) {
         printf("[BLE] scan...\n");
-        pBLEScan->start(BLE_SCAN_DURATION, false);
+        pBLEScan->start(BLE_SCAN_DURATION_SECS, false);
         last_ble_scan = millis();
     }
     
-    if (pBLEScan->isScanning() == false && millis() - last_ble_scan > BLE_SCAN_DURATION * 1000) {
+    if (pBLEScan->isScanning() == false && millis() - last_ble_scan > BLE_SCAN_DURATION_SECS * 1000) {
         pBLEScan->clearResults();
     }
     
