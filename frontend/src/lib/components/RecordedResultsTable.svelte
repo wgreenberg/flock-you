@@ -3,33 +3,29 @@
     import { onMount } from "svelte";
     import DeviceSummaryCard from "./DeviceSummaryCard.svelte";
     import DeviceModal from "./DeviceModal.svelte";
+    import { RecordingStore } from "$lib/recordingStore.svelte";
 
     let results: ScanResults[] = $state([]);
     let selectedIndex: number | undefined = $state(undefined);
     let selectedDevice: DeviceSummary | undefined = $state(undefined);
+    let store: RecordingStore | undefined = undefined;
     let showModal = $state(false);
 
-    onMount(() => {
-        for (let i=0; i<window.localStorage.length; i++) {
-            try {
-                const timestampStr = window.localStorage.key(i)!;
-                results.push(ScanResults.fromJSON(window.localStorage.getItem(timestampStr)!));
-            } catch(err) {
-                console.error(err);
-                console.error(`failed to load result ${i}: ${err}`);
-            }
+    onMount(async () => {
+        store = await RecordingStore.open();
+        const timestamps = await store.listTimestamps();
+        for (const timestamp of timestamps) {
+            const result = await store.loadResults(timestamp);
+            results.push(result);
         }
     });
 
     function deleteRecording(index: number) {
-        const key = window.localStorage.key(index);
-        if (key === null) {
-            throw new Error(`failed to delete recording with index ${index}`);
-        }
+        const result = results[index];
         if (index === selectedIndex) {
             selectedIndex = undefined;
         }
-        window.localStorage.removeItem(key);
+        store!.deleteResults(result);
         results = results.filter((_, i) => i !== index);
     }
 
@@ -46,7 +42,7 @@
         if (seconds < 60) {
             return `${seconds.toPrecision(2)}s`;
         } else {
-            return `${Math.floor(seconds / 60)}h ${(seconds % 60).toPrecision(2)}s`
+            return `${Math.floor(seconds / 60)}m ${(seconds % 60).toPrecision(2)}s`
         }
     }
 </script>

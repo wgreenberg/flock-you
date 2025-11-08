@@ -1,6 +1,7 @@
 import { decode } from "@msgpack/msgpack";
 import ouiData from "oui-data";
 import { lookupManufacturerIDName } from '$lib/companyIDs';
+import { RecordingStore } from "./recordingStore.svelte";
 
 export enum WifiFrameType {
     beacon = 'beacon',
@@ -349,6 +350,9 @@ export class Scanner {
 
     private lastSeenTimestamp: Map<string, number> = new Map();
 
+    constructor(private recordingStore: RecordingStore) {
+    }
+
     public summarize(
         timeThreshold: number,
         rssiThreshold: number,
@@ -379,7 +383,8 @@ export class Scanner {
     }
 
     public static async setupDummy() {
-        const result = new Scanner();
+        const store = await RecordingStore.open();
+        const result = new Scanner(store);
         setInterval(async () => {
             const location = result.currentLocation;
             const now = getNow();
@@ -426,7 +431,8 @@ export class Scanner {
         const service = await server.getPrimaryService(serviceUUID);
         const characteristic = await service.getCharacteristic(characteristicUUID);
         await characteristic.startNotifications();
-        const result = new Scanner();
+        const store = await RecordingStore.open();
+        const result = new Scanner(store);
         characteristic.addEventListener('characteristicvaluechanged', async (_: Event) => {
             try {
                 result.processEvent(characteristic.value!);
@@ -447,19 +453,19 @@ export class Scanner {
         return this.lastSeenTimestamp.get(`${mac}`);
     }
 
-    public saveLocalStorage() {
-        window.localStorage.setItem(`${this.results.scanStartedTimestamp}`, `${this.results.toJSON()}`);
+    public async persist() {
+        await this.recordingStore.updateResults(this.results);
     }
 
     appendDeviceEvent(event: DeviceEvent) {
         this.lastSeenTimestamp.set(`${event.mac}`, event.timestamp);
         this.results.appendDeviceEvent(event);
-        this.saveLocalStorage();
+        this.persist();
     }
 
     appendDetectionEvent(event: FlockDetectionEvent) {
         this.results.appendDetectionEvent(event);
-        this.saveLocalStorage();
+        this.persist();
     }
 
     processEvent(data: DataView) {
