@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include "esp_wifi.h"
 #include "esp_wifi_types.h"
+#include "scanManager.h"
 
 // ============================================================================
 // CONFIGURATION
@@ -46,50 +47,6 @@ static unsigned long last_ble_scan = 0;
 #define MAX_DEVICE_NAMES 20
 
 // ============================================================================
-// DETECTION PATTERNS (Extracted from Real Flock Safety Device Databases)
-// ============================================================================
-
-// WiFi SSID patterns to detect (case-insensitive)
-static const char* wifi_ssid_patterns[] = {
-    "flock",        // Standard Flock Safety naming
-    "Flock",        // Capitalized variant
-    "FLOCK",        // All caps variant
-    "FS Ext Battery", // Flock Safety Extended Battery devices
-    "Penguin",      // Penguin surveillance devices
-    "Pigvision",     // Pigvision surveillance systems
-};
-
-// Known Flock Safety MAC address prefixes (from real device databases)
-static const char* mac_prefixes[] = {
-    // FS Ext Battery devices
-    "58:8e:81", "cc:cc:cc", "ec:1b:bd", "90:35:ea", "04:0d:84", 
-    "f0:82:c0", "1c:34:f1", "38:5b:44", "94:34:69", "b4:e3:f9",
-
-    // Flock WiFi devices
-    "70:c9:4e", "3c:91:80", "d8:f3:bc", "80:30:49", "14:5a:fc",
-    "74:4c:a1", "08:3a:88", "9c:2f:9d", "94:08:53", "e4:aa:ea"
-
-    // Penguin devices - these are NOT OUI based, so use local ouis
-    // from the wigle.net db relative to your location 
-    // "cc:09:24", "ed:c7:63", "e8:ce:56", "ea:0c:ea", "d8:8f:14",
-    // "f9:d9:c0", "f1:32:f9", "f6:a0:76", "e4:1c:9e", "e7:f2:43",
-    // "e2:71:33", "da:91:a9", "e1:0e:15", "c8:ae:87", "f4:ed:b2",
-    // "d8:bf:b5", "ee:8f:3c", "d7:2b:21", "ea:5a:98"
-};
-
-// Device name patterns for BLE advertisement detection
-static const char* device_name_patterns[] = {
-    "FS Ext Battery",  // Flock Safety Extended Battery
-    "Penguin",         // Penguin surveillance devices
-    "Flock",           // Standard Flock Safety devices
-    "Pigvision"        // Pigvision surveillance systems
-};
-
-static const u16_t ble_manufacturer_ids[] = {
-    0x09C8, // XUNTONG
-};
-
-// ============================================================================
 // GLOBAL VARIABLES
 // ============================================================================
 
@@ -98,11 +55,14 @@ static NimBLEScan* pBLEScan;
 static NimBLEServer* pServer;
 static const char* BLE_DEVICE_NAME = "FlockYou";
 static const NimBLEUUID BLE_SERVICE_UUID = NimBLEUUID(0xACAB0001);
-static const char* BLE_CHARACTERISTIC_UUID = "0001";
+static const char* SCAN_CHARACTERISTIC_UUID = "0001";
+static const char* FOXHUNT_CHARACTERISTIC_UUID = "0002";
 
 // WiFi state
 static uint8_t current_channel = 1;
 static unsigned long last_channel_hop = 0;
+
+static ScanManager scanManager;
 
 // ============================================================================
 // AUDIO SYSTEM
@@ -117,15 +77,13 @@ const int G4hz = 392;
 const int A4hz = 440;
 const int B4hz = 494;
 
-void beep(int frequency, int duration_ms)
-{
+void beep(int frequency, int duration_ms) {
     if (MUTE) return;
     tone(BUZZER_PIN, frequency, duration_ms);
     delay(duration_ms + 50);
 }
 
-void boot_beep_sequence()
-{
+void bootBeepSequence() {
     printf("Initializing audio system...\n");
     printf("Playing boot sequence: Low -> High pitch\n");
     beep(C4hz, BOOT_BEEP_DURATION);
@@ -134,8 +92,7 @@ void boot_beep_sequence()
     printf("Audio system ready\n\n");
 }
 
-void flock_detected_beep_sequence()
-{
+void detectionBeepSequence() {
     printf("FLOCK SAFETY DEVICE DETECTED!\n");
     printf("Playing alert sequence: 3 fast high-pitch beeps\n");
     for (int i = 0; i < 3; i++) {
@@ -151,7 +108,7 @@ void notify(MsgPack::Packer packer) {
         printf("no service found\n");
         return;
     }
-    NimBLECharacteristic* pChr = pSvc->getCharacteristic(BLE_CHARACTERISTIC_UUID);
+    NimBLECharacteristic* pChr = pSvc->getCharacteristic(SCAN_CHARACTERISTIC_UUID);
     if (!pChr) {
         printf("no characteristic found!\n");
         return;
@@ -164,11 +121,22 @@ void notify(MsgPack::Packer packer) {
         return;
     }
 
-    pChr->setValue(packer.data(), packer.size());
-    pChr->notify();
+    pChr->notify(packer.data(), packer.size());
 }
 
-bool check_range(int val, int low, int high) {
+void sendDetectionEvent(const uint8_t mac[6], std::string detectionType, std::string categoryName) {
+    std::array<unsigned int, 6> packed_mac { mac[0], mac[1], mac[2], mac[3], mac[4], mac[5] }; 
+    MsgPack::Packer packer;
+    packer.to_array(
+        "detection",
+        detectionType.c_str(),
+        categoryName.c_str(),
+        packed_mac
+    );
+    notify(packer);
+}
+
+bool checkRange(int val, int low, int high) {
     return val >= low && val <= high;
 }
 
@@ -179,30 +147,29 @@ void multibeep(std::vector<int> freqs, int total_duration) {
     }
 }
 
-void proximity_beep(int rssi) {
+void proximityBeep(int rssi) {
     int duration = 500;
     if (rssi < -150) {
         // play 2 sad descending beeps
         multibeep({ C4hz, B3hz }, duration);
-    } else if (check_range(rssi, -150, -100)) {
+    } else if (checkRange(rssi, -150, -100)) {
         multibeep({ C4hz }, duration);
-    } else if (check_range(rssi, -100, -80)) {
+    } else if (checkRange(rssi, -100, -80)) {
         multibeep({ C4hz, E4hz }, duration);
-    } else if (check_range(rssi, -80, -50)) {
+    } else if (checkRange(rssi, -80, -50)) {
         multibeep({ C4hz, E4hz, G4hz }, duration);
-    } else if (check_range(rssi, -50, -20)) {
+    } else if (checkRange(rssi, -50, -20)) {
         multibeep({ C4hz, E4hz, G4hz, B4hz }, duration);
     } else {
         multibeep({ C4hz, 2 * C4hz, C4hz, 2 * C4hz }, duration);
     }
 }
 
-void out_of_range_beep() {
+void outOfRangeBeep() {
     multibeep({ B3hz, B3hz, B3hz }, 300);
 }
 
-void heartbeat_pulse()
-{
+void heartbeatPulse() {
     printf("Heartbeat: Device still in range\n");
     beep(HEARTBEAT_FREQ, HEARTBEAT_DURATION);
     delay(100);
@@ -213,7 +180,7 @@ void heartbeat_pulse()
 // JSON OUTPUT FUNCTIONS
 // ============================================================================
 
-void send_wifi_device_info(const char* ssid, const uint8_t mac[6], int rssi, int frame_type)
+void sendWiFiDeviceInfo(std::string ssid, const uint8_t mac[6], int rssi, int frameType)
 {
     std::array<unsigned int, 6> packed_mac { mac[0], mac[1], mac[2], mac[3], mac[4], mac[5] };
 
@@ -221,16 +188,16 @@ void send_wifi_device_info(const char* ssid, const uint8_t mac[6], int rssi, int
     packer.to_array(
         "wifi",
         rssi,
-        ssid,
+        ssid.c_str(),
         current_channel,
         packed_mac,
-        frame_type
+        frameType
     );
 
     notify(packer);
 }
 
-void send_ble_device_info(
+void sendBLEDeviceInfo(
     const uint8_t mac[6],
     const char* name,
     int rssi,
@@ -258,93 +225,6 @@ void send_ble_device_info(
     notify(packer);
 }
 
-// ============================================================================
-// DETECTION HELPER FUNCTIONS
-// ============================================================================
-
-bool check_ble_manufacturer_ids(const uint8_t* mac, std::vector<u16_t> ids) {
-    for (int i=0; i<sizeof(ble_manufacturer_ids)/sizeof(u16_t); i++) {
-        for (int j=0; j<ids.size(); j++) {
-            if (ble_manufacturer_ids[i] == ids[j]) {
-                std::array<unsigned int, 6> packed_mac { mac[0], mac[1], mac[2], mac[3], mac[4], mac[5] };
-                MsgPack::Packer packer;
-                packer.to_array(
-                    "detection",
-                    packed_mac,
-                    "ble_id",
-                    ids[j]
-                );
-                notify(packer);
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-bool check_mac_prefix(const uint8_t* mac)
-{
-    char mac_str[9];  // Only need first 3 octets for prefix check
-    snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x", mac[0], mac[1], mac[2]);
-    
-    for (int i = 0; i < sizeof(mac_prefixes)/sizeof(mac_prefixes[0]); i++) {
-        if (strncasecmp(mac_str, mac_prefixes[i], 8) == 0) {
-            std::array<unsigned int, 6> packed_mac { mac[0], mac[1], mac[2], mac[3], mac[4], mac[5] };
-            MsgPack::Packer packer;
-            packer.to_array(
-                "detection",
-                packed_mac,
-                "mac",
-                mac_prefixes[i]
-            );
-            notify(packer);
-            return true;
-        }
-    }
-    return false;
-}
-
-bool check_ssid_pattern(const uint8_t* mac, const char* ssid)
-{
-    if (!ssid) return false;
-    
-    for (int i = 0; i < sizeof(wifi_ssid_patterns)/sizeof(wifi_ssid_patterns[0]); i++) {
-        if (strcasestr(ssid, wifi_ssid_patterns[i])) {
-            std::array<unsigned int, 6> packed_mac { mac[0], mac[1], mac[2], mac[3], mac[4], mac[5] };
-            MsgPack::Packer packer;
-            packer.to_array(
-                "detection",
-                packed_mac,
-                "ssid",
-                ssid,
-                wifi_ssid_patterns[i]
-            );
-            notify(packer);
-            return true;
-        }
-    }
-    return false;
-}
-
-bool check_device_name_pattern(const uint8_t* mac, std::string name)
-{
-    for (int i = 0; i < sizeof(device_name_patterns)/sizeof(device_name_patterns[0]); i++) {
-        if (name.find(device_name_patterns[i]) != std::string::npos) {
-            std::array<unsigned int, 6> packed_mac { mac[0], mac[1], mac[2], mac[3], mac[4], mac[5] };
-            MsgPack::Packer packer;
-            packer.to_array(
-                "detection",
-                packed_mac,
-                "name",
-                name.c_str(),
-                device_name_patterns[i]
-            );
-            notify(packer);
-            return true;
-        }
-    }
-    return false;
-}
 struct FoxhunterState {
     uint8_t target_mac[6];
     int rssi;
@@ -356,11 +236,11 @@ class State {
         enum ModeType { Detector, Foxhunter } mode;
         State() {
             this->mode = State::ModeType::Detector;
-            this->reset_detection();
-            this->foxhunter_state.rssi = 0;
+            this->resetDetection();
+            this->foxhunterState.rssi = 0;
         };
-        void handle_wifi_packet(const char* ssid, const uint8_t mac[6], int rssi, int frame_type);
-        void handle_ble_packet(
+        void handleWifiPacket(std::string ssid, const uint8_t mac[6], int rssi, int frameType);
+        void handleBLEPacket(
             const uint8_t mac[6],
             std::string name,
             int rssi,
@@ -368,130 +248,134 @@ class State {
             std::vector<std::string> manufacturerData
         );
         void update();
-        void foxhunt(const uint8_t *mac);
+        void foxhunt(const uint8_t mac[6]);
         void detect();
     private:
-        bool device_in_range;
-        unsigned long last_detection_time;
-        unsigned long last_heartbeat;
-        bool foxhunt_auto_off = false;
-        FoxhunterState foxhunter_state;
-        void foxhunt_mac(const uint8_t mac[6], int rssi);
-        void handle_flock_detected(bool flock_detected, const uint8_t mac[6]);
-        void reset_detection();
+        bool deviceInRange;
+        unsigned long lastDetectionTime;
+        unsigned long lastHeartbeat;
+        bool foxhuntAutoOff = false;
+        FoxhunterState foxhunterState;
+        void handleFoxhuntQuery(const uint8_t mac[6], int rssi);
+        void handleScanDetection(const uint8_t mac[6], ScanResult result);
+        void resetDetection();
 };
 
-void State::reset_detection() {
-    this->device_in_range = false;
-    this->last_detection_time = 0;
-    this->last_heartbeat = 0;
+void State::resetDetection() {
+    this->deviceInRange = false;
+    this->lastDetectionTime = 0;
+    this->lastHeartbeat = 0;
 }
 
 void State::foxhunt(const uint8_t mac[6]) {
     this->mode = State::ModeType::Foxhunter;
     for (int i=0; i<6; i++) {
-        this->foxhunter_state.target_mac[i] = mac[i];
+        this->foxhunterState.target_mac[i] = mac[i];
     }
-    this->foxhunter_state.rssi = 0;
-    this->reset_detection();
+    this->foxhunterState.rssi = 0;
+    this->resetDetection();
 }
 
 void State::detect() {
     this->mode = State::ModeType::Detector;
-    this->reset_detection();
+    this->resetDetection();
 }
 
-void State::handle_flock_detected(bool flockDetected, const uint8_t mac[6]) {
-    if (!flockDetected) {
-        return;
+void State::handleScanDetection(const uint8_t mac[6], ScanResult result) {
+    sendDetectionEvent(mac, result.detectionType, result.categoryName);
+    if (!this->deviceInRange) {
+        detectionBeepSequence();
+        this->deviceInRange = true;
+        this->lastHeartbeat = millis();
+
+        // if we're not already hunting, find this new device
+        if (this->mode != ModeType::Foxhunter) {
+            this->foxhunt(mac);
+            this->foxhuntAutoOff = true; // if we go out of range, go back to detect mode
+        }
     }
-    if (!this->device_in_range) {
-        flock_detected_beep_sequence();
-        this->foxhunt(mac); // foxhunt the camera
-        this->foxhunt_auto_off = true; // if we go out of range, go back to detect mode
-        this->device_in_range = true;
-        this->last_heartbeat = millis();
-    }
-    this->last_detection_time = millis();
+    this->lastDetectionTime = millis();
 }
 
 void State::update() {
     // Handle heartbeat pulse if device is in range
-    if (this->device_in_range) {
+    if (this->deviceInRange) {
         // Check if device has gone out of range (no detection for 30 seconds)
-        if (millis() - this->last_detection_time >= 30000) {
+        if (millis() - this->lastDetectionTime >= 30000) {
             printf("Device out of range - stopping heartbeat\n");
-            this->device_in_range = false;
-            out_of_range_beep();
-            if (this->foxhunt_auto_off && this->mode == State::ModeType::Foxhunter) {
+            this->deviceInRange = false;
+            outOfRangeBeep();
+            if (this->foxhuntAutoOff && this->mode == State::ModeType::Foxhunter) {
                 this->detect();
             }
             return;
         }
 
         unsigned long interval = this->mode == State::ModeType::Detector ? 10000 : 3000;
-        if (millis() - this->last_heartbeat >= interval) {
+        if (millis() - this->lastHeartbeat >= interval) {
             if (this->mode == State::ModeType::Detector) {
-                heartbeat_pulse();
+                heartbeatPulse();
             } else {
-                proximity_beep(this->foxhunter_state.rssi);
+                proximityBeep(this->foxhunterState.rssi);
             }
-            this->last_heartbeat = millis();
+            this->lastHeartbeat = millis();
         }
     }
 }
 
-void State::handle_wifi_packet(
-    const char* ssid,
+void State::handleWifiPacket(
+    std::string ssid,
     const uint8_t mac[6],
     int rssi,
-    int frame_type
+    int frameType
 ) {
-    send_wifi_device_info(ssid, mac, rssi, frame_type);
+    sendWiFiDeviceInfo(ssid, mac, rssi, frameType);
 
-    if (this->mode == State::ModeType::Detector) {
-        bool flockDetected = strlen(ssid) > 0 && check_ssid_pattern(mac, ssid)
-            || check_mac_prefix(mac);
-        this->handle_flock_detected(flockDetected, mac);
-    } else {
-        this->foxhunt_mac(mac, rssi);
+    bool flockDetected = ssid.length() > 0 && scanManager.checkSSIDPattern(mac, ssid) ||
+        scanManager.checkMACPrefix(mac);
+    if (flockDetected) {
+        this->handleScanDetection(mac, scanManager.scanResult);
+    }
+    if (this->mode == State::ModeType::Foxhunter) {
+        this->handleFoxhuntQuery(mac, rssi);
     }
 }
 
-void State::handle_ble_packet(
+void State::handleBLEPacket(
     const uint8_t mac[6],
     std::string name,
     int rssi,
     std::vector<u16_t> manufacturerIDs,
     std::vector<std::string> manufacturerData
 ) {
-    send_ble_device_info(mac, name.c_str(), rssi, manufacturerIDs, manufacturerData);
+    sendBLEDeviceInfo(mac, name.c_str(), rssi, manufacturerIDs, manufacturerData);
 
-    if (this->mode == State::ModeType::Detector) {
-        bool flockDetected = check_ble_manufacturer_ids(mac, manufacturerIDs)
-            || check_mac_prefix(mac)
-            || check_device_name_pattern(mac, name);
-        this->handle_flock_detected(flockDetected, mac);
-    } else {
-        this->foxhunt_mac(mac, rssi);
+    bool flockDetected = scanManager.checkBLEManufacturerIDs(mac, manufacturerIDs)
+        || scanManager.checkMACPrefix(mac)
+        || scanManager.checkBLEDeviceName(mac, name);
+    if (flockDetected) {
+        this->handleScanDetection(mac, scanManager.scanResult);
+    }
+
+    if (this->mode == State::ModeType::Foxhunter) {
+        this->handleFoxhuntQuery(mac, rssi);
     }
 }
 
-void State::foxhunt_mac(const uint8_t mac[6], int rssi) {
+void State::handleFoxhuntQuery(const uint8_t mac[6], int rssi) {
     for (int i=0; i<6; i++) {
-        if (mac[i] != this->foxhunter_state.target_mac[i]) {
+        if (mac[i] != this->foxhunterState.target_mac[i]) {
             return;
         }
     }
-    this->last_detection_time = millis();
-    this->foxhunter_state.rssi = rssi;
-    if (!this->device_in_range) {
-        this->device_in_range = true;
+    this->lastDetectionTime = millis();
+    this->foxhunterState.rssi = rssi;
+    if (!this->deviceInRange) {
+        this->deviceInRange = true;
     }
 }
 
 static State state;
-
 
 // ============================================================================
 // WIFI PROMISCUOUS MODE HANDLER
@@ -510,7 +394,7 @@ typedef struct {
     wifi_ieee80211_mac_hdr_t hdr;
 } wifi_ieee80211_packet_t;
 
-void wifi_sniffer_packet_handler(void* buff, wifi_promiscuous_pkt_type_t type)
+void wifiSnifferPacketHandler(void* buff, wifi_promiscuous_pkt_type_t type)
 {
     if (type != WIFI_PKT_MGMT) {
         return;
@@ -522,24 +406,23 @@ void wifi_sniffer_packet_handler(void* buff, wifi_promiscuous_pkt_type_t type)
     uint8_t *payload = (uint8_t *)ipkt + 24;
     
     // Check for probe requests (subtype 0x04) and beacons (subtype 0x08)
-    uint8_t frame_type = ppkt->payload[0];
-    if (frame_type != 0x80 && frame_type != 0x40) {
+    uint8_t frameType = ppkt->payload[0];
+    if (frameType != 0x80 && frameType != 0x40) {
         return;
     }
     
     // Extract SSID from probe request or beacon
-    char ssid[33] = {0};
-    int ssid_start = frame_type == 0x80 ? 13 : 1;
+    std::string ssid = "";
+    int ssid_start = frameType == 0x80 ? 13 : 1;
     uint8_t ssid_len = payload[ssid_start];
     if (ssid_len > 33) {
         return;
     }
     for (int i=0; i < ssid_len; i++) {
-        ssid[i] = payload[ssid_start + i + 1];
+        ssid += (char)payload[ssid_start + i + 1];
     }
-    ssid[ssid_len] = '\0';
 
-    state.handle_wifi_packet(ssid, hdr->addr2, ppkt->rx_ctrl.rssi, frame_type);
+    state.handleWifiPacket(ssid, hdr->addr2, ppkt->rx_ctrl.rssi, frameType);
 }
 
 // ============================================================================
@@ -570,7 +453,7 @@ class AdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
             manufacturerData.push_back(data);
         }
 
-        state.handle_ble_packet(mac, name, rssi, manufacturerIDs, manufacturerData);
+        state.handleBLEPacket(mac, name, rssi, manufacturerIDs, manufacturerData);
     }
 };
 
@@ -578,7 +461,7 @@ class AdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
 // CHANNEL HOPPING
 // ============================================================================
 
-void hop_channel()
+void hopChannel()
 {
     unsigned long now = millis();
     if (now - last_channel_hop > CHANNEL_HOP_INTERVAL) {
@@ -596,6 +479,29 @@ void hop_channel()
 // MAIN FUNCTIONS
 // ============================================================================
 
+class FoxhuntCharactersticCallbacks: public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* pCharacteristic) override {
+        printf("received foxhunt request, parsing...\n");
+        NimBLEAttValue value = pCharacteristic->getValue();
+        MsgPack::Unpacker unpacker;
+        unpacker.feed(value.data(), value.length());
+        const uint8_t mac[6] = {
+            unpacker.unpackUInt8(),
+            unpacker.unpackUInt8(),
+            unpacker.unpackUInt8(),
+            unpacker.unpackUInt8(),
+            unpacker.unpackUInt8(),
+            unpacker.unpackUInt8()
+        };
+        if (!unpacker.decoded()) {
+            printf("failed! invalid MAC\n");
+            return;
+        }
+        printf("now foxhunting...\n");
+        state.foxhunt(mac);
+    }
+} foxhuntCallbacks;
+
 void setup()
 {
     Serial.begin(115200);
@@ -604,7 +510,7 @@ void setup()
     // Initialize buzzer
     pinMode(BUZZER_PIN, OUTPUT);
     digitalWrite(BUZZER_PIN, LOW);
-    boot_beep_sequence();
+    bootBeepSequence();
 
     // Initialize WiFi in promiscuous mode
     WiFi.mode(WIFI_STA);
@@ -612,7 +518,7 @@ void setup()
     delay(100);
     
     esp_wifi_set_promiscuous(true);
-    esp_wifi_set_promiscuous_rx_cb(&wifi_sniffer_packet_handler);
+    esp_wifi_set_promiscuous_rx_cb(&wifiSnifferPacketHandler);
     esp_wifi_set_channel(current_channel, WIFI_SECOND_CHAN_NONE);
     
     printf("WiFi promiscuous mode enabled on channel %d\n", current_channel);
@@ -627,9 +533,15 @@ void setup()
     pServer = NimBLEDevice::createServer();
     NimBLEService* pService = pServer->createService(BLE_SERVICE_UUID);
     NimBLECharacteristic *pScanResultCharacteristic = pService->createCharacteristic(
-        BLE_CHARACTERISTIC_UUID,
-        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::READ_ENC | NIMBLE_PROPERTY::READ_AUTHEN | NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::INDICATE
+        SCAN_CHARACTERISTIC_UUID,
+        READ | READ_ENC | NOTIFY
     );
+    NimBLECharacteristic *pFoxhuntCharacteristic = pService->createCharacteristic(
+        FOXHUNT_CHARACTERISTIC_UUID,
+        WRITE | WRITE_ENC | NOTIFY
+    );
+    // WRITE_AUTHEN breaks read/write calbacks?
+    pFoxhuntCharacteristic->setCallbacks(&foxhuntCallbacks);
 
     pService->start();
     NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
@@ -651,7 +563,7 @@ void setup()
 void loop()
 {
     // Handle channel hopping for WiFi promiscuous mode
-    hop_channel();
+    hopChannel();
     
     state.update();
     

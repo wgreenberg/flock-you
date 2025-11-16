@@ -16,7 +16,7 @@ export enum DeviceType {
 export enum DetectionType {
     mac = 'mac',
     ssid = 'ssid',
-    name = 'name',
+    ble_name = 'ble_name',
     ble_id = 'ble_id'
 }
 
@@ -47,35 +47,12 @@ export interface WifiDeviceSignal {
     frameType: number,
 }
 
-export interface NameDetection {
-    type: DetectionType.name,
-    mac: number[],
-    name: string,
-    matchedName: string,
-}
-
-export interface SSIDDetection {
-    type: DetectionType.ssid,
-    mac: number[],
-    ssid: string,
-    matchedSSID: string,
-}
-
-export interface MACDetection {
-    type: DetectionType.mac,
-    mac: number[],
-    matchedMACPrefix: string,
-}
-
-export interface BLEManufacturerDetection {
-    type: DetectionType.ble_id,
-    mac: number[],
-    id: number,
-    idName: string | undefined,
-}
-
 export type DeviceEvent = WifiDeviceSignal | BluetoothDeviceSignal;
-export type FlockDetectionEvent = NameDetection | SSIDDetection | MACDetection | BLEManufacturerDetection;
+export type FlockDetectionEvent = {
+    type: DetectionType,
+    category: string,
+    mac: number[],
+};
 
 export interface RssiRecording {
     rssi: number,
@@ -422,20 +399,23 @@ export class Scanner {
     public static async setupFromBLEDevice(): Promise<Scanner> {
         const serviceUUIDAlias = 0xACAB0001;
         const serviceUUID = 0x5F9B34FB; // not entirely clear why this is different
-        const characteristicUUID = 0x0001;
+        const scanCharacteristicUUID = 0x0001;
+        const foxhuntCharacteristicUUID = 0x0002;
         const device = await navigator.bluetooth.requestDevice({filters: [{ name: "FlockYou", services: [serviceUUIDAlias] }], optionalServices: [serviceUUID] });
         if (!device.gatt) {
             throw new Error(`device has no GATT`);
         }
         const server = await device.gatt.connect();
         const service = await server.getPrimaryService(serviceUUID);
-        const characteristic = await service.getCharacteristic(characteristicUUID);
-        await characteristic.startNotifications();
+        const scanCharacteristic = await service.getCharacteristic(scanCharacteristicUUID);
+        await scanCharacteristic.startNotifications();
+        const foxhuntCharacteristic = await service.getCharacteristic(foxhuntCharacteristicUUID);
+        console.log(foxhuntCharacteristic);
         const store = await RecordingStore.open();
         const result = new Scanner(store);
-        characteristic.addEventListener('characteristicvaluechanged', async (_: Event) => {
+        scanCharacteristic.addEventListener('characteristicvaluechanged', async (_: Event) => {
             try {
-                result.processEvent(characteristic.value!);
+                result.processEvent(scanCharacteristic.value!);
             } catch (err) {
                 result.errors.push(`${err}`);
             }
@@ -507,38 +487,14 @@ export class Scanner {
                 frameType: array[5],
             });
         } else if (eventType === 'detection') {
-            const mac: number[] = array[1];
-            const detectionType: string = array[2];
-            if (detectionType === 'mac') {
-                this.appendDetectionEvent({
-                    type: DetectionType.mac,
-                    mac,
-                    matchedMACPrefix: array[3],
-                });
-            } else if (detectionType === 'name') {
-                this.appendDetectionEvent({
-                    type: DetectionType.name,
-                    mac,
-                    name: array[3],
-                    matchedName: array[4],
-                });
-            } else if (detectionType === 'ssid') {
-                this.appendDetectionEvent({
-                    type: DetectionType.ssid,
-                    mac,
-                    ssid: array[3],
-                    matchedSSID: array[4],
-                });
-            } else if (detectionType === 'ble_id') {
-                this.appendDetectionEvent({
-                    type: DetectionType.ble_id,
-                    mac,
-                    id: array[3],
-                    idName: lookupManufacturerIDName(array[3]),
-                })
-            } else {
-                throw new Error(`invalid detection event: ${array}`);
-            }
+            const type = DetectionType[array[1] as keyof typeof DetectionType];
+            const category: string = array[2];
+            const mac: number[] = array[3];
+            this.appendDetectionEvent({
+                type,
+                category,
+                mac,
+            });
         } else if (eventType === "data_too_large") {
             throw new Error("data payload too large");
         } else {
