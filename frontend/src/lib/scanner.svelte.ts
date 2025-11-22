@@ -161,6 +161,7 @@ export class Scanner {
         const scanCharacteristic = await service.getCharacteristic(scanCharacteristicUUID);
         await scanCharacteristic.startNotifications();
         const foxhuntCharacteristic = await service.getCharacteristic(foxhuntCharacteristicUUID);
+        await foxhuntCharacteristic.startNotifications();
         const updateScanCategoryCharacteristic = await service.getCharacteristic(updateScanCategoryCharacteristicUUID)
         const store = await RecordingStore.open();
         const result = new Scanner(
@@ -228,6 +229,9 @@ export class Scanner {
             } catch (err) {
                 result.errors.push(`${err}`);
             }
+        });
+        foxhuntCharacteristic.addEventListener('characteristicvaluechanged', async (_: Event) => {
+            console.log('foxhunt changed', foxhuntCharacteristic.value);
         });
         setInterval(() => {
             if (!server.connected) {

@@ -91,9 +91,8 @@
         scanner.foxhuntDevice(device);
     }
 
-    let interval: number;
     onMount(() => {
-        interval = setInterval(updateDevices, 250);
+        setInterval(updateDevices, 250);
     });
 </script>
 

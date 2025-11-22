@@ -8,7 +8,6 @@ export const CATEGORIES: ScanCategory[] = [
             "FS Ext Battery", // Flock Safety Extended Battery devices
             "Penguin", // Penguin surveillance devices
             "Pigvision", // Pigvision surveillance systems
-            "cat girl cult", // removeme
         ],
         ouis: [
             // FS Ext Battery devices
