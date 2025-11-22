@@ -24,19 +24,22 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm i
+        run: |
+          cd frontend
+          npm i
 
       - name: build
         env:
           BASE_PATH: '/${{ github.event.repository.name }}'
         run: |
+          cd frontend
           npm run build
 
       - name: Upload Artifacts
         uses: actions/upload-pages-artifact@v3
         with:
           # this should match the `pages` option in your adapter-static options
-          path: 'build/'
+          path: 'frontend/build/'
 
   deploy:
     needs: build_site
