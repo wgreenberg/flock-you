@@ -1,5 +1,6 @@
 <script lang="ts">
-    import { DeviceType, Scanner, WifiFrameType, type DeviceSummary } from "$lib/scanResults.svelte";
+    import { DeviceType, WifiFrameType, type DeviceSummary } from "$lib/scanResults.svelte";
+    import { Scanner } from "$lib/scanner.svelte";
     import { onMount } from "svelte";
     import DeviceSummaryCard from "./DeviceSummaryCard.svelte";
     import RssiThresholdControl from "./RssiThresholdControl.svelte";
@@ -46,7 +47,9 @@
                 rssiThreshold,
                 pinnedMACs,
             );
-            currentLocation = scanner.currentLocation!.coords;
+            if (scanner.currentLocation) {
+                currentLocation = scanner.currentLocation.coords;
+            }
         } catch(e) {
             scanner.errors.push(JSON.stringify(e));
         }
@@ -84,6 +87,10 @@
         showModal = true;
     }
 
+    function onFoxhunt(device: DeviceSummary) {
+        scanner.foxhuntDevice(device);
+    }
+
     let interval: number;
     onMount(() => {
         interval = setInterval(updateDevices, 250);
@@ -101,14 +108,14 @@
         <p>Detected Flock Devices</p>
         <div class="flex flex-wrap w-4/5">
             {#each detectedDevices as device}
-                <DeviceSummaryCard {device} {onSelect} />
+                <DeviceSummaryCard {device} {onSelect} {onFoxhunt} />
             {/each}
         </div>
         <p>Pinned</p>
         <div class="flex flex-wrap w-4/5">
             {#each pinnedDevices as device}
                 {#if showDevice(device)}
-                    <DeviceSummaryCard {device} {onUnpin} {onSelect} />
+                    <DeviceSummaryCard {device} {onUnpin} {onSelect} {onFoxhunt} />
                 {/if}
             {/each}
         </div>
@@ -117,9 +124,9 @@
             {#each inRangeDevices as device}
                 {#if showDevice(device)}
                     {#if pinnedMACs.includes(`${device.mac}`) }
-                        <DeviceSummaryCard {device} {onSelect} />
+                        <DeviceSummaryCard {device} {onSelect} {onFoxhunt} />
                     {:else}
-                        <DeviceSummaryCard {device} {onPin} {onSelect} />
+                        <DeviceSummaryCard {device} {onPin} {onSelect} {onFoxhunt} />
                     {/if}
                 {/if}
             {/each}

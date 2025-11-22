@@ -9,7 +9,7 @@ class ScanCategory {
         std::set<std::array<uint8_t, 3>> ouis;
         std::set<std::string> ble_names;
         std::set<u16_t> ble_manufacturer_ids;
-
+        ScanCategory(std::string n) : name(n) {}
         static ScanCategory defaultFlockScanCategory();
         static ScanCategory debugCategory();
         bool checkBLEManufacturerIDs(std::vector<u16_t> needles);
@@ -41,7 +41,7 @@ class ScanManager {
         ScanManager() {
             // TODO: read from ROM, then fallback to defaults
             categories.push_back(ScanCategory::defaultFlockScanCategory());
-            categories.push_back(ScanCategory::debugCategory());
+            // categories.push_back(ScanCategory::debugCategory());
             scanResult = { std::string(), std::string() };
         }
 

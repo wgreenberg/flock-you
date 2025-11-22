@@ -1,8 +1,7 @@
 <script lang="ts">
     import ScanResultsTable from "$lib/components/ScanResultsTable.svelte";
-    import { Scanner } from "$lib/scanResults.svelte";
+    import { Scanner } from "$lib/scanner.svelte";
     import NavBar from "$lib/components/NavBar.svelte";
-    import { onMount } from "svelte";
     import RecordedResultsTable from "$lib/components/RecordedResultsTable.svelte";
 
     let scanner: Scanner | undefined = $state(undefined);

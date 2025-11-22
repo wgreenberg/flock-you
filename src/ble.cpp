@@ -171,46 +171,67 @@ void FoxhuntCharactersticCallbacks::onWrite(NimBLECharacteristic* pCharacteristi
     printf("received foxhunt request, parsing...\n");
     MsgPack::Unpacker unpacker;
     unpacker.feed(value.data(), value.length());
-    const uint8_t mac[6] = {
-        unpacker.unpackUInt8(),
-        unpacker.unpackUInt8(),
-        unpacker.unpackUInt8(),
-        unpacker.unpackUInt8(),
-        unpacker.unpackUInt8(),
-        unpacker.unpackUInt8()
-    };
-    if (!unpacker.decoded()) {
-        printf("failed! invalid MAC\n");
+    if (unpacker.isArray()) {
+        unpacker.unpackArraySize();
+        const uint8_t mac[6] = {
+            (uint8_t)unpacker.unpackUInt(),
+            (uint8_t)unpacker.unpackUInt(),
+            (uint8_t)unpacker.unpackUInt(),
+            (uint8_t)unpacker.unpackUInt(),
+            (uint8_t)unpacker.unpackUInt(),
+            (uint8_t)unpacker.unpackUInt(),
+        };
+        printf(
+            "now foxhunting %02X:%02X:%02X:%02X:%02X:%02X...\n",
+            mac[0],
+            mac[1],
+            mac[2],
+            mac[3],
+            mac[4],
+            mac[5]
+        );
+        mState->foxhunt(mac, false);
         return;
     }
-    printf("now foxhunting...\n");
-    mState->foxhunt(mac, false);
+    printf("failed! invalid MAC\n");
 }
 
 void ScanConfigCharactersticCallbacks::onWrite(NimBLECharacteristic* pCharacteristic) {
     NimBLEAttValue value = pCharacteristic->getValue();
-    printf("received scan config request, parsing...\n");
+    printf("received scan config request, parsing %d bytes...\n", value.length());
     MsgPack::Unpacker unpacker;
     unpacker.feed(value.data(), value.length());
-    MsgPack::str_t type = unpacker.unpackString();
-    if (type.equals("drop")) {
-        mState->scanManager->drop();
-    } else if (type.equals("commit")) {
-        mState->scanManager->commit();
-    } else if (type.equals("edit")) {
-        MsgPack::str_t categoryName = unpacker.unpackString();
-        if (!unpacker.decoded()) {
-            printf("failed to decode edit\n");
+
+    if (!unpacker.isArray()) {
+        MsgPack::str_t type = unpacker.unpackString();
+        if (type.equals("drop")) {
+            printf("dropping\n");
+            mState->scanManager->drop();
+        } else if (type.equals("commit")) {
+            printf("committing\n");
+            mState->scanManager->commit();
+        } else {
+            printf("invalid config type \"%s\"\n", type.c_str());
             return;
         }
-        CategoryEdit edit;
-        if (!edit.unpack(unpacker)) {
-            printf("failed to decode edit\n");
-            return;
-        }
-        mState->scanManager->handleCategoryEdit(categoryName.c_str(), edit);
     } else {
-        printf("invalid config type \"%s\"\n", type.c_str());
-        return;
+        unpacker.unpackArraySize();
+        MsgPack::str_t type = unpacker.unpackString();
+        if (type.equals("edit")) {
+            MsgPack::str_t categoryName = unpacker.unpackString();
+            if (!unpacker.decoded()) {
+                printf("failed to decode category name\n");
+                return;
+            }
+            CategoryEdit edit;
+            if (!edit.unpack(unpacker)) {
+                printf("failed to decode edit\n");
+                return;
+            }
+            mState->scanManager->handleCategoryEdit(categoryName.c_str(), edit);
+        } else {
+            printf("invalid config type \"%s\"\n", type.c_str());
+            return;
+        }
     }
 }

@@ -1,5 +1,6 @@
 <script lang="ts">
-    import type { Scanner } from "$lib/scanResults.svelte";
+    import type { Scanner } from "$lib/scanner.svelte";
+    import UpdateButton from "./UpdateButton.svelte";
 
     let { selection = $bindable(), scanner }: {
         selection: string,
@@ -12,7 +13,7 @@
 </script>
 
 <nav class="items-center justify-between p-6 bg-gray-800/50 after:pointer-events-none after:absolute after:inset-x-0 after:bottom-0 after:h-px after:bg-white/10">
-    <div class="w-full block flex flex-row justify-between flex-grow">
+    <div class="w-full flex flex-row justify-between flex-grow">
         <div class="text-sm flex flex-row">
             {#each selectionOptions as item}
                 {#if item.selection === selection}
@@ -27,7 +28,8 @@
             {/each}
         </div>
         <div></div>
-        <div>
+        <div class="flex flex-row gap-5">
+            <UpdateButton {scanner} />
             <span>Status: {scanner ? scanner.status : 'disconnected' }</span>
         </div>
     </div>

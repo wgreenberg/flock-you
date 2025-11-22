@@ -3,11 +3,12 @@
     import DeviceSummaryItems from "./DeviceSummaryItems.svelte";
     import SummaryIcon from "./SummaryIcon.svelte";
 
-    let { device, onPin, onUnpin, onSelect }: {
+    let { device, onPin, onUnpin, onSelect, onFoxhunt }: {
         device: DeviceSummary,
         onPin?: (device: DeviceSummary) => void,
         onUnpin?: (device: DeviceSummary) => void,
         onSelect?: (device: DeviceSummary) => void,
+        onFoxhunt?: (device: DeviceSummary) => void,
     } = $props();
 
     // awkward svelte/tailwind nonsense to get colors updating dynamically
@@ -29,6 +30,12 @@
     function onClickCard() {
         if (onSelect) {
             onSelect(device);
+        }
+    }
+
+    function onClickHunt() {
+        if (onFoxhunt) {
+            onFoxhunt(device);
         }
     }
 </script>
@@ -55,6 +62,11 @@
             {#if onPin || onUnpin}
                 <button onclick={onClickPin}>
                     <SummaryIcon type={onPin ? 'pin' : 'unpin'} />
+                </button>
+            {/if}
+            {#if onFoxhunt}
+                <button onclick={onClickHunt}>
+                    <SummaryIcon type='foxhunt' />
                 </button>
             {/if}
         </div>

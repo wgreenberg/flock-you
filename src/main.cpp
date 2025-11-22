@@ -7,8 +7,7 @@
 static ScanManager scanManager;
 static State state(&scanManager);
 
-void setup()
-{
+void setup() {
     Serial.begin(115200);
     delay(1000);
     initBuzzer();
@@ -23,8 +22,7 @@ void setup()
     printf("System ready - the hunt begins\n\n");
 }
 
-void loop()
-{
+void loop() {
     state.update();
     hopChannel();
     scanBLE();

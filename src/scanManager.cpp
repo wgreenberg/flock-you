@@ -1,8 +1,7 @@
 #include "scanManager.h"
 
 ScanCategory ScanCategory::defaultFlockScanCategory() {
-    ScanCategory result;
-    result.name = "Flock";
+    ScanCategory result("Flock");
 
     result.wifi_ssids = {
         "flock", "Flock", "FLOCK",
@@ -38,8 +37,7 @@ ScanCategory ScanCategory::defaultFlockScanCategory() {
 }
 
 ScanCategory ScanCategory::debugCategory() {
-    ScanCategory result;
-    result.name = "debug";
+    ScanCategory result("debug");
     result.wifi_ssids = {
         "cat girl cult",
     };
@@ -88,38 +86,45 @@ bool ScanCategory::checkBLEDeviceName(std::string needle) {
 bool CategoryEdit::unpack(MsgPack::Unpacker unpacker) {
     MsgPack::str_t type = unpacker.unpackString();
     if (!unpacker.decoded()) {
+        printf("failed to decode type\n");
         return false;
     }
     if (type.equals("ble_id")) {
-        u16_t id = unpacker.unpackUInt16();
+        u16_t id = unpacker.unpackInt();
         if (!unpacker.decoded()) {
+            printf("failed to decode id\n");
             return false;
         }
+        printf("adding id %d\n", id);
         tag = Tag::BLEManufacturerID;
         ble_manufacturer_id = id;
     } else if (type.equals("ble_name")) {
-        MsgPack::str_t name = unpacker.unpackString16();
-        if (!unpacker.decoded()) {
-            return false;
-        }
         tag = Tag::BLEDeviceName;
-        bleDeviceName = name.c_str();
-    } else if (type.equals("ssid")) {
-        MsgPack::str_t ssid = unpacker.unpackString16();
+        bleDeviceName = std::string(unpacker.unpackString().c_str());
         if (!unpacker.decoded()) {
+            printf("failed to decode ble_name\n");
             return false;
         }
+        printf("adding ble_name %s\n", bleDeviceName.c_str());
+    } else if (type.equals("ssid")) {
         tag = Tag::SSID;
-        ssid = ssid.c_str();
+        ssid = std::string(unpacker.unpackString().c_str());
+        if (!unpacker.decoded()) {
+            printf("failed to decode ssid\n");
+            return false;
+        }
+        printf("adding ssid %s\n", ssid.c_str());
     } else if (type.equals("oui")) {
-        std::array<uint8_t, 3> oui = {
-            unpacker.unpackUInt8(),
-            unpacker.unpackUInt8(),
-            unpacker.unpackUInt8(),
+        unpacker.unpackArraySize();
+        oui = {
+            (uint8_t)unpacker.unpackUInt(),
+            (uint8_t)unpacker.unpackUInt(),
+            (uint8_t)unpacker.unpackUInt(),
         };
+        printf("adding oui: %d:%d:%d\n", oui[0], oui[1], oui[2]);
         tag = Tag::OUI;
-        oui = oui;
     } else {
+        printf("invalid type %s\n", type.c_str());
         return false;
     }
     return true;
@@ -135,7 +140,7 @@ void ScanManager::commit() {
 
 void ScanManager::handleCategoryEdit(std::string categoryName, CategoryEdit edit) {
     ScanCategory *cat = NULL;
-    for (auto haystack : categories) {
+    for (auto &haystack : categories) {
         if (haystack.name == categoryName) {
             printf("editing ScanCategory %s\n", categoryName.c_str());
             cat = &haystack;
@@ -143,10 +148,8 @@ void ScanManager::handleCategoryEdit(std::string categoryName, CategoryEdit edit
     }
     if (cat == NULL) {
         printf("creating new ScanCategory %s\n", categoryName.c_str());
-        ScanCategory newCat;
-        newCat.name = categoryName;
-        categories.push_back(newCat);
-        cat = &newCat;
+        categories.push_back(ScanCategory(categoryName));
+        cat = &categories[categories.size() - 1];
     }
     if (edit.tag == CategoryEdit::Tag::BLEDeviceName) {
         cat->ble_names.insert(edit.bleDeviceName);
@@ -182,7 +185,7 @@ bool ScanManager::checkMACPrefix(const uint8_t mac[6]) {
 }
 
 bool ScanManager::checkSSIDPattern(const uint8_t mac[6], std::string ssid) {
-    for (auto cat : categories) {
+    for (auto &cat : categories) {
         if (cat.checkSSIDPattern(ssid)) {
             scanResult.categoryName = cat.name;
             scanResult.detectionType = "ssid";
@@ -193,7 +196,7 @@ bool ScanManager::checkSSIDPattern(const uint8_t mac[6], std::string ssid) {
 }
 
 bool ScanManager::checkBLEDeviceName(const uint8_t mac[6], std::string name) {
-    for (auto cat : categories) {
+    for (auto &cat : categories) {
         if (cat.checkBLEDeviceName(name)) {
             scanResult.categoryName = cat.name;
             scanResult.detectionType = "ble_name";
